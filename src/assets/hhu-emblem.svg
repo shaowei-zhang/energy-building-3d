@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="河海大学校徽">
+  <defs>
+    <linearGradient id="hhuRing" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8FD8F7"/>
+      <stop offset=".45" stop-color="#2E86AB"/>
+      <stop offset="1" stop-color="#103A52"/>
+    </linearGradient>
+    <radialGradient id="hhuFace" cx="34%" cy="26%" r="90%">
+      <stop offset="0" stop-color="#2E5A7C"/>
+      <stop offset="1" stop-color="#0D1D30"/>
+    </radialGradient>
+    <linearGradient id="hhuSheen" x1=".1" y1="0" x2=".7" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity=".34"/>
+      <stop offset=".5" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <path id="hhuArcTop" d="M15 60A45 45 0 0 1 105 60"/>
+  </defs>
+
+  <circle cx="60" cy="60" r="57" fill="url(#hhuRing)"/>
+  <circle cx="60" cy="60" r="53" fill="none" stroke="#0E2A3D" stroke-opacity=".45"/>
+  <circle cx="60" cy="60" r="42" fill="url(#hhuFace)"/>
+  <circle cx="60" cy="60" r="42" fill="none" stroke="#8FD8F7" stroke-opacity=".5"/>
+
+  <text font-size="15" font-weight="700" fill="#F0F9FF" letter-spacing="3"
+        font-family="'PingFang SC','Microsoft YaHei',sans-serif">
+    <textPath href="#hhuArcTop" startOffset="50%" text-anchor="middle">河海大学</textPath>
+  </text>
+
+  <g fill="none" stroke-linecap="round">
+    <path d="M37 54q7-7 14 0t14 0" stroke="#9BDDF8" stroke-width="3"/>
+    <path d="M33 64q7-7 14 0t14 0t14 0" stroke="#5BB3E0" stroke-width="3"/>
+    <path d="M37 74q7-7 14 0t14 0" stroke="#2E86AB" stroke-width="3"/>
+  </g>
+
+  <text x="60" y="89" text-anchor="middle" font-size="6.4" font-weight="600" fill="#8FD8F7"
+        letter-spacing=".7" textLength="62" lengthAdjust="spacingAndGlyphs"
+        font-family="Georgia,'Times New Roman',serif">HOHAI UNIVERSITY</text>
+
+  <circle cx="60" cy="60" r="57" fill="url(#hhuSheen)"/>
+</svg>

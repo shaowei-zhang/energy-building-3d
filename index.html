@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>能源楼 3D 总览</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+      :root {
+        --bg: #EDE4D3; --bg-2: #E0D5C0; --accent: #2E86AB; --green: #5B9C51;
+        --amber: #D4943C; --red: #C75450;
+        --txt: #3D3327; --txt-dim: #8A7B66; --line: rgba(139,115,85,.22);
+        --card: rgba(255,250,242,.95);
+        --font-num: "Bahnschrift","DIN Alternate","Rajdhani","Segoe UI",sans-serif;
+        --font: "PingFang SC","Hiragino Sans GB","Microsoft YaHei","Segoe UI",sans-serif;
+      }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body { height: 100%; overflow: hidden; }
+      body {
+        background: var(--bg);
+        color: var(--txt);
+        font-family: var(--font);
+        -webkit-font-smoothing: antialiased;
+      }
+      #app { height: 100%; width: 100%; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
