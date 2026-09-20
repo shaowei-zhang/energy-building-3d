@@ -8,10 +8,11 @@ const emit = defineEmits(['back'])
 const hostEl = ref(null)
 const failed = ref(false)
 const active = ref(null)
-// 标签显隐（背面隐藏），只在状态变化时写回，避免逐帧触发重渲染
+const panelPos = ref({ x: 0, y: 0 })
+const panelVisible = ref(false)
 const visible = ref(BUILDING_NODES.map(() => true))
+const panelScale = ref(0)
 
-// 标签 DOM 逐帧直接改 transform，不走响应式
 const labelEls = []
 function setLabelEl(el, i) {
   labelEls[i] = el
@@ -28,6 +29,7 @@ let rafId = 0
 let resumeTimer = 0
 let resizeObserver = null
 let reduceMotion = false
+let pmremGenerator = null
 
 const TONE_COLORS = {
   blue: 0x46A8D6,
@@ -36,184 +38,201 @@ const TONE_COLORS = {
   red: 0xE3706B
 }
 
-// ---------- 纹理生成函数 ----------
+// ---------- 纹理生成 ----------
 
-// 主楼：米白石材立面 + 深色窄窗 + 阳台（canvas 动态生成）
-function makeFacadeTexture(opts = {}) {
-  const {
-    width = 512,
-    height = 1024,
-    windowCols = 8,
-    windowRows = 6,
-    litProbability = 0.35
-  } = opts
-
+// 1. 科技感外墙（冷灰金属/石材）
+function makeStoneTexture() {
   const canvas = document.createElement('canvas')
-  canvas.width = width
-  canvas.height = height
+  canvas.width = 1024
+  canvas.height = 1024
   const ctx = canvas.getContext('2d')
 
-  // 1. 石材底色
-  ctx.fillStyle = '#E8DFD0'
-  ctx.fillRect(0, 0, width, height)
+  // 冷灰色底色
+  ctx.fillStyle = '#B0B8C4'
+  ctx.fillRect(0, 0, 1024, 1024)
 
-  // 砖缝网格
-  const brickH = height / windowRows
-  const brickW = width / windowCols
-  ctx.strokeStyle = 'rgba(160,145,120,.28)'
-  ctx.lineWidth = 1.5
-  for (let r = 0; r <= windowRows; r++) {
+  for (let i = 0; i < 15000; i++) {
+    const x = Math.random() * 1024
+    const y = Math.random() * 1024
+    const r = Math.random() * 1.5 + 0.5
+    ctx.fillStyle = `rgba(${180 + Math.random() * 20}, ${190 + Math.random() * 20}, ${200 + Math.random() * 20}, ${Math.random() * 0.15})`
     ctx.beginPath()
-    ctx.moveTo(0, r * brickH)
-    ctx.lineTo(width, r * brickH)
-    ctx.stroke()
-  }
-  for (let c = 0; c <= windowCols; c++) {
-    const offset = (c % 2) * (brickW / 2)
-    ctx.beginPath()
-    ctx.moveTo(offset, 0)
-    ctx.lineTo(offset, height)
-    ctx.stroke()
-    ctx.beginPath()
-    ctx.moveTo(c * brickW, 0)
-    ctx.lineTo(c * brickW, height)
-    ctx.stroke()
+    ctx.arc(x, y, r, 0, Math.PI * 2)
+    ctx.fill()
   }
 
-  // 2. 窗户
-  const winPadX = brickW * 0.22
-  const winPadY = brickH * 0.28
-  const winW = brickW - winPadX * 2
-  const winH = brickH - winPadY * 2
-  for (let r = 0; r < windowRows; r++) {
-    for (let c = 0; c < windowCols; c++) {
-      const seed = ((r * windowCols + c) * 37 + 13) % 100
-      const x = c * brickW + winPadX
-      const y = r * brickH + winPadY
-      ctx.fillStyle = '#1A2A3A'
-      ctx.fillRect(x, y, winW, winH)
-      if (seed < litProbability * 100) {
-        ctx.fillStyle = 'rgba(180,215,245,.55)'
-        ctx.fillRect(x + 1, y + 1, winW - 2, winH - 2)
-      } else {
-        ctx.fillStyle = 'rgba(20,35,55,.85)'
-        ctx.fillRect(x + 1, y + 1, winW - 2, winH - 2)
-      }
-      ctx.strokeStyle = '#121E2D'
-      ctx.lineWidth = 1
-      ctx.strokeRect(x, y, winW, winH)
-      ctx.beginPath()
-      ctx.moveTo(x + winW / 2, y)
-      ctx.lineTo(x + winW / 2, y + winH)
-      ctx.stroke()
-      ctx.beginPath()
-      ctx.moveTo(x, y + winH / 2)
-      ctx.lineTo(x + winW, y + winH / 2)
-      ctx.stroke()
-    }
-  }
-
-  // 3. 阳台
-  const balconyRows = [1, 3]
-  const balconyCols = [1, 2, 3]
-  for (const r of balconyRows) {
-    for (const c of balconyCols) {
-      const bx = c * brickW + winPadX - 3
-      const by = r * brickH + winPadY + winH
-      const bw = winW + 6
-      const bh = brickH * 0.22
-      ctx.fillStyle = '#B8A898'
-      ctx.fillRect(bx, by, bw, bh)
-      const railH = brickH * 0.28
-      ctx.strokeStyle = '#4A3F35'
-      ctx.lineWidth = 1.5
-      ctx.beginPath()
-      ctx.moveTo(bx, by)
-      ctx.lineTo(bx + bw, by)
-      ctx.stroke()
-      const postCount = Math.floor(bw / 10)
-      for (let p = 0; p <= postCount; p++) {
-        const px = bx + (p / postCount) * bw
-        ctx.beginPath()
-        ctx.moveTo(px, by)
-        ctx.lineTo(px, by - railH)
-        ctx.stroke()
-      }
-      ctx.beginPath()
-      ctx.moveTo(bx, by - railH)
-      ctx.lineTo(bx + bw, by - railH)
-      ctx.stroke()
-    }
-  }
-
-  const tex = new THREE.CanvasTexture(canvas)
-  tex.anisotropy = 4
-  return tex
-}
-
-// 基座纹理
-function makePedestalTexture() {
-  const canvas = document.createElement('canvas')
-  canvas.width = 256
-  canvas.height = 128
-  const ctx = canvas.getContext('2d')
-  ctx.fillStyle = '#8C8278'
-  ctx.fillRect(0, 0, 256, 128)
-  ctx.strokeStyle = 'rgba(100,90,80,.3)'
-  ctx.lineWidth = 1
-  const rows = 4, cols = 8
-  const rh = 128 / rows, rw = 256 / cols
-  for (let r = 0; r <= rows; r++) {
-    ctx.beginPath(); ctx.moveTo(0, r * rh); ctx.lineTo(256, r * rh); ctx.stroke()
-  }
-  for (let c = 0; c <= cols; c++) {
-    const off = (c % 2) * (rw / 2)
-    ctx.beginPath(); ctx.moveTo(off, 0); ctx.lineTo(off, 128); ctx.stroke()
-    ctx.beginPath(); ctx.moveTo(c * rw, 0); ctx.lineTo(c * rw, 128); ctx.stroke()
-  }
-  const tex = new THREE.CanvasTexture(canvas)
-  tex.anisotropy = 2
-  return tex
-}
-
-// 栏杆纹理
-function makeRailingTexture() {
-  const canvas = document.createElement('canvas')
-  canvas.width = 256
-  canvas.height = 64
-  const ctx = canvas.getContext('2d')
-  ctx.fillStyle = '#9E958A'
-  ctx.fillRect(0, 0, 256, 64)
-  ctx.strokeStyle = '#5A5045'
+  // 科技感分割线（暗灰色）
+  ctx.strokeStyle = 'rgba(80, 90, 100, 0.4)'
   ctx.lineWidth = 2
-  const count = 16
-  for (let i = 0; i <= count; i++) {
-    const x = (i / count) * 256
-    ctx.beginPath(); ctx.moveTo(x, 8); ctx.lineTo(x, 56); ctx.stroke()
+  for (let y = 0; y < 1024; y += 128) {
+    ctx.beginPath()
+    ctx.moveTo(0, y)
+    ctx.lineTo(1024, y)
+    ctx.stroke()
   }
-  ctx.lineWidth = 3
-  ctx.beginPath(); ctx.moveTo(0, 12); ctx.lineTo(256, 12); ctx.stroke()
-  ctx.beginPath(); ctx.moveTo(0, 52); ctx.lineTo(256, 52); ctx.stroke()
+  for (let x = 0; x < 1024; x += 128) {
+    ctx.beginPath()
+    ctx.moveTo(x, 0)
+    ctx.lineTo(x, 1024)
+    ctx.stroke()
+  }
+
   const tex = new THREE.CanvasTexture(canvas)
-  tex.wrapS = THREE.RepeatWrapping
-  tex.wrapT = THREE.RepeatWrapping
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping
+  tex.repeat.set(3, 3)
+  tex.anisotropy = 8
   return tex
 }
 
-// 锚点光晕 sprite 纹理
-function makeGlowTexture() {
+// 2. 发光金属纹理（楼梯、门框）
+function makeMetalTexture() {
   const canvas = document.createElement('canvas')
-  canvas.width = 128
-  canvas.height = 128
+  canvas.width = 512
+  canvas.height = 512
   const ctx = canvas.getContext('2d')
-  const grad = ctx.createRadialGradient(64, 64, 0, 64, 64, 64)
-  grad.addColorStop(0, 'rgba(255,255,255,.95)')
-  grad.addColorStop(.28, 'rgba(255,255,255,.45)')
-  grad.addColorStop(1, 'rgba(255,255,255,0)')
-  ctx.fillStyle = grad
-  ctx.fillRect(0, 0, 128, 128)
+
+  ctx.fillStyle = '#8A9AA8'
+  ctx.fillRect(0, 0, 512, 512)
+
+  for (let x = 0; x < 512; x += 2) {
+    const alpha = 0.05 + Math.random() * 0.15
+    ctx.strokeStyle = `rgba(${200 + Math.random() * 55}, ${210 + Math.random() * 45}, ${230 + Math.random() * 25}, ${alpha})`
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(x, 0)
+    ctx.lineTo(x, 512)
+    ctx.stroke()
+  }
+
   const tex = new THREE.CanvasTexture(canvas)
-  tex.needsUpdate = true
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping
+  tex.repeat.set(2, 2)
+  tex.anisotropy = 8
+  return tex
+}
+
+// 3. 科技窗户纹理（深空蓝玻璃 + 发光）
+function makeWindowTexture() {
+  const canvas = document.createElement('canvas')
+  canvas.width = 512
+  canvas.height = 512
+  const ctx = canvas.getContext('2d')
+
+  // 深空蓝底色
+  const grad = ctx.createLinearGradient(0, 0, 512, 512)
+  grad.addColorStop(0, '#0A1A2A')
+  grad.addColorStop(0.5, '#1A3A5A')
+  grad.addColorStop(1, '#0A1A2A')
+  ctx.fillStyle = grad
+  ctx.fillRect(0, 0, 512, 512)
+
+  // 内部发光（青色高光）
+  ctx.fillStyle = 'rgba(0, 255, 255, 0.2)'
+  ctx.fillRect(50, 50, 412, 412)
+
+  // 反光
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.2)'
+  ctx.beginPath()
+  ctx.moveTo(0, 512)
+  ctx.lineTo(512, 0)
+  ctx.lineTo(512, 100)
+  ctx.lineTo(100, 512)
+  ctx.fill()
+
+  // 暗色窗框
+  ctx.strokeStyle = '#1A1A1A'
+  ctx.lineWidth = 12
+  ctx.strokeRect(6, 6, 500, 500)
+
+  // 十字分隔
+  ctx.lineWidth = 8
+  ctx.beginPath()
+  ctx.moveTo(256, 6)
+  ctx.lineTo(256, 506)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.moveTo(6, 256)
+  ctx.lineTo(506, 256)
+  ctx.stroke()
+
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.anisotropy = 8
+  return tex
+}
+
+// 4. 科技地面纹理（深灰网格 + 微光）
+function makeGroundTexture() {
+  const canvas = document.createElement('canvas')
+  canvas.width = 1024
+  canvas.height = 1024
+  const ctx = canvas.getContext('2d')
+
+  // 深灰色底
+  ctx.fillStyle = '#1A1F26'
+  ctx.fillRect(0, 0, 1024, 1024)
+
+  // 细节噪点
+  for (let i = 0; i < 10000; i++) {
+    const x = Math.random() * 1024
+    const y = Math.random() * 1024
+    ctx.fillStyle = `rgba(100, 120, 140, ${Math.random() * 0.1})`
+    ctx.fillRect(x, y, 2, 2)
+  }
+
+  // 科技感网格线（青色微光）
+  ctx.strokeStyle = 'rgba(0, 255, 255, 0.15)'
+  ctx.lineWidth = 2
+  for (let y = 0; y < 1024; y += 64) {
+    ctx.beginPath()
+    ctx.moveTo(0, y)
+    ctx.lineTo(1024, y)
+    ctx.stroke()
+  }
+  for (let x = 0; x < 1024; x += 64) {
+    ctx.beginPath()
+    ctx.moveTo(x, 0)
+    ctx.lineTo(x, 1024)
+    ctx.stroke()
+  }
+
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping
+  tex.repeat.set(10, 10)
+  tex.anisotropy = 8
+  return tex
+}
+
+// 5. 光伏板纹理（深色发光菱形板）
+function makePVTexture() {
+  const canvas = document.createElement('canvas')
+  canvas.width = 512
+  canvas.height = 512
+  const ctx = canvas.getContext('2d')
+
+  // 深蓝色底
+  ctx.fillStyle = '#0A0F1A'
+  ctx.fillRect(0, 0, 512, 512)
+
+  // 菱形网格线（发光青色）
+  ctx.strokeStyle = 'rgba(0, 200, 255, 0.4)'
+  ctx.lineWidth = 2
+  for (let i = -512; i < 1024; i += 64) {
+    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i + 512, 512); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(i, 512); ctx.lineTo(i + 512, 0); ctx.stroke();
+  }
+
+  // 表面高光
+  const grad = ctx.createLinearGradient(0, 0, 512, 512)
+  grad.addColorStop(0, 'rgba(0, 255, 255, 0.15)')
+  grad.addColorStop(0.5, 'rgba(0, 0, 0, 0)')
+  grad.addColorStop(1, 'rgba(0, 150, 255, 0.1)')
+  ctx.fillStyle = grad
+  ctx.fillRect(0, 0, 512, 512)
+
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping
+  tex.repeat.set(4, 4)
+  tex.anisotropy = 8
   return tex
 }
 
@@ -222,29 +241,46 @@ function makeGlowTexture() {
 function buildScene(Controls) {
   scene = new THREE.Scene()
 
-  camera = new THREE.PerspectiveCamera(46, 1, 0.1, 300)
-  camera.position.set(13, 12, 17)
+  // 科技感环境背景（深色渐变）
+  scene.background = new THREE.Color(0x0A101A)
+  scene.fog = new THREE.FogExp2(0x0A101A, 0.005)
 
-  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
+  camera = new THREE.PerspectiveCamera(45, 1, 0.1, 500)
+  camera.position.set(22, 18, 28)
+
+  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.outputColorSpace = THREE.SRGBColorSpace
+  renderer.toneMapping = THREE.ACESFilmicToneMapping
+  renderer.toneMappingExposure = 1.2
+  renderer.shadowMap.enabled = true
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap
   host.appendChild(renderer.domElement)
 
+  // 环境贴图（冷色科技环境）
+  pmremGenerator = new THREE.PMREMGenerator(renderer)
+  pmremGenerator.compileEquirectangularShader()
+  const envScene = new THREE.Scene()
+  envScene.background = new THREE.Color(0x1A2A3A)
+  const envLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1)
+  envScene.add(envLight)
+  const envMap = pmremGenerator.fromScene(envScene).texture
+  scene.environment = envMap
+  pmremGenerator.dispose()
+
   controls = new Controls(camera, renderer.domElement)
-  controls.target.set(0, 4.3, 0)
+  controls.target.set(0, 4, 0)
   controls.enableDamping = true
   controls.dampingFactor = 0.06
-  controls.minDistance = 8
-  controls.maxDistance = 42
-  controls.maxPolarAngle = Math.PI * 0.495
+  controls.minDistance = 15
+  controls.maxDistance = 80
+  controls.maxPolarAngle = Math.PI * 0.48
   controls.autoRotate = !reduceMotion
-  controls.autoRotateSpeed = 0.7
+  controls.autoRotateSpeed = 0.5
+
   controls.addEventListener('start', () => {
     controls.autoRotate = false
-    if (resumeTimer) {
-      window.clearTimeout(resumeTimer)
-      resumeTimer = 0
-    }
+    if (resumeTimer) { window.clearTimeout(resumeTimer); resumeTimer = 0 }
   })
   controls.addEventListener('end', () => {
     if (reduceMotion) return
@@ -254,132 +290,386 @@ function buildScene(Controls) {
     }, 3000)
   })
 
-  // 灯光
-  scene.add(new THREE.AmbientLight(0xC8D8E8, 0.85))
-  const dirLight = new THREE.DirectionalLight(0xFFF4E0, 1.2)
-  dirLight.position.set(9, 15, 10)
-  scene.add(dirLight)
-  const fillLight = new THREE.DirectionalLight(0xA8C8E0, 0.4)
-  fillLight.position.set(-6, 8, -8)
+  // 灯光系统：冷白光 + 蓝色辅光
+  const hemiLight = new THREE.HemisphereLight(0xE0F0FF, 0x101820, 1.2)
+  hemiLight.position.set(0, 20, 0)
+  scene.add(hemiLight)
+
+  const sunLight = new THREE.DirectionalLight(0xE0F0FF, 2.5)
+  sunLight.position.set(25, 35, 20)
+  sunLight.castShadow = true
+  sunLight.shadow.mapSize.width = 4096
+  sunLight.shadow.mapSize.height = 4096
+  sunLight.shadow.camera.near = 1
+  sunLight.shadow.camera.far = 100
+  sunLight.shadow.camera.left = -35
+  sunLight.shadow.camera.right = 35
+  sunLight.shadow.camera.top = 35
+  sunLight.shadow.camera.bottom = -35
+  sunLight.shadow.bias = -0.0005
+  scene.add(sunLight)
+
+  // 蓝色辅光（增加科技感）
+  const fillLight = new THREE.DirectionalLight(0x0088FF, 1.0)
+  fillLight.position.set(-15, 15, -20)
   scene.add(fillLight)
-  const pointLight = new THREE.PointLight(0x46A8D6, 1.2, 46, 2)
-  pointLight.position.set(-7, 8, -7)
-  scene.add(pointLight)
 
-  // ---------- 底座 ----------
-  const base = new THREE.Mesh(
-    new THREE.CircleGeometry(11.5, 64),
-    new THREE.MeshBasicMaterial({ color: 0x1B4A6B, transparent: true, opacity: 0.22 })
-  )
-  base.rotation.x = -Math.PI / 2
-  base.position.y = -0.04
-  scene.add(base)
-
-  const ring = new THREE.Mesh(
-    new THREE.RingGeometry(11.5, 11.85, 64),
-    new THREE.MeshBasicMaterial({ color: 0x46A8D6, transparent: true, opacity: 0.5, side: THREE.DoubleSide })
-  )
-  ring.rotation.x = -Math.PI / 2
-  ring.position.y = -0.03
-  scene.add(ring)
-
-  const grid = new THREE.GridHelper(24, 24, 0x2C6B90, 0x18384F)
-  grid.position.y = -0.02
-  grid.material.transparent = true
-  grid.material.opacity = 0.45
-  scene.add(grid)
-
-  // ---------- 裙楼基座 ----------
-  const pedestalTex = makePedestalTexture()
-  const podiumMat = new THREE.MeshStandardMaterial({
-    map: pedestalTex,
-    roughness: 0.82,
-    metalness: 0.15
+  // 地面
+  const groundTex = makeGroundTexture()
+  const groundMat = new THREE.MeshStandardMaterial({
+    map: groundTex,
+    roughness: 0.4,
+    metalness: 0.8,
+    envMapIntensity: 1.0
   })
-  const podium = new THREE.Mesh(new THREE.BoxGeometry(9.4, 1.9, 14.4), podiumMat)
-  podium.position.y = 0.95
-  scene.add(podium)
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(120, 120), groundMat)
+  ground.rotation.x = -Math.PI / 2
+  ground.receiveShadow = true
+  scene.add(ground)
 
-  // ---------- 主楼 ----------
-  const facadeTex = makeFacadeTexture({ windowCols: 8, windowRows: 6 })
+  // 建筑基础平台（增加发光条带感）
+  const foundationMat = new THREE.MeshStandardMaterial({
+    color: 0x2A3440,
+    roughness: 0.3,
+    metalness: 0.9,
+    envMapIntensity: 1.5
+  })
+  const foundation = new THREE.Mesh(new THREE.BoxGeometry(18, 0.5, 14), foundationMat)
+  foundation.position.y = 0.25
+  foundation.receiveShadow = true
+  foundation.castShadow = true
+  scene.add(foundation)
+
+  // 材质准备
+  const stoneTex = makeStoneTexture()
   const wallMat = new THREE.MeshStandardMaterial({
-    map: facadeTex,
-    roughness: 0.78,
-    metalness: 0.08
+    map: stoneTex,
+    color: 0xD0D8E0, // 冷银灰
+    roughness: 0.4,
+    metalness: 0.6, // 增加金属感
+    envMapIntensity: 1.2
   })
-  const main = new THREE.Mesh(
-    new THREE.BoxGeometry(7, 5, 12),
-    [wallMat, wallMat, wallMat, wallMat, wallMat, wallMat]
-  )
-  main.position.y = 1.9 + 2.5
-  scene.add(main)
 
-  // ---------- 屋顶女儿墙 ----------
-  const railingTex = makeRailingTexture()
-  const railingMat = new THREE.MeshStandardMaterial({
-    map: railingTex,
-    roughness: 0.65,
-    metalness: 0.2
+  const windowTex = makeWindowTexture()
+  const windowMat = new THREE.MeshPhysicalMaterial({
+    map: windowTex,
+    roughness: 0.1,
+    metalness: 0.1,
+    clearcoat: 1.0,
+    clearcoatRoughness: 0.1,
+    emissive: 0x002244, // 内部发光
+    emissiveIntensity: 0.5,
+    envMapIntensity: 2.0
   })
-  const parapetH = 1.1
-  const parapetT = 0.18
-  const longPanel = new THREE.Mesh(
-    new THREE.BoxGeometry(7.4, parapetH, parapetT),
-    railingMat
+
+  const metalTex = makeMetalTexture()
+  const metalMat = new THREE.MeshStandardMaterial({
+    map: metalTex,
+    color: 0xA0B0C0,
+    roughness: 0.1, // 高亮金属
+    metalness: 1.0,
+    envMapIntensity: 2.5
+  })
+
+  const concreteMat = new THREE.MeshStandardMaterial({
+    color: 0x4A5568, // 深空灰
+    roughness: 0.6,
+    metalness: 0.2,
+    envMapIntensity: 0.8
+  })
+
+  // 玻璃自动门材质
+  const doorMat = new THREE.MeshPhysicalMaterial({
+    color: 0x1A2A3A,
+    roughness: 0.1,
+    metalness: 0.1,
+    clearcoat: 1.0,
+    clearcoatRoughness: 0.1,
+    emissive: 0x0055AA, // 发光蓝
+    emissiveIntensity: 0.8,
+    envMapIntensity: 2.0
+  })
+
+  const pvTex = makePVTexture()
+  const pvMat = new THREE.MeshStandardMaterial({
+    map: pvTex,
+    roughness: 0.1,
+    metalness: 0.95,
+    envMapIntensity: 2.0
+  })
+
+  // ========== 主建筑（二层） ==========
+  const buildingGroup = new THREE.Group()
+
+  const floor1Wall = new THREE.Mesh(new THREE.BoxGeometry(14, 3.5, 10), wallMat)
+  floor1Wall.position.set(0, 2.25, 0)
+  floor1Wall.castShadow = true
+  floor1Wall.receiveShadow = true
+  buildingGroup.add(floor1Wall)
+
+  const floor2Wall = new THREE.Mesh(new THREE.BoxGeometry(14, 3.2, 10), wallMat)
+  floor2Wall.position.set(0, 5.65, 0)
+  floor2Wall.castShadow = true
+  floor2Wall.receiveShadow = true
+  buildingGroup.add(floor2Wall)
+
+  const floorSlab = new THREE.Mesh(new THREE.BoxGeometry(14.4, 0.4, 10.4), concreteMat)
+  floorSlab.position.set(0, 4.2, 0)
+  floorSlab.castShadow = true
+  floorSlab.receiveShadow = true
+  buildingGroup.add(floorSlab)
+
+  // 屋顶走道（金属拉丝）
+  const roofWalkway = new THREE.Mesh(new THREE.BoxGeometry(14.4, 0.4, 10.4), metalMat)
+  roofWalkway.position.set(0, 7.45, 0)
+  roofWalkway.castShadow = true
+  roofWalkway.receiveShadow = true
+  buildingGroup.add(roofWalkway)
+
+  // 人字形坡屋顶（光伏板）
+  const roofW = 10
+  const roofD = 8
+  const roofH = 1.8
+  
+  const slopeLen = Math.sqrt((roofW/2)*(roofW/2) + roofH*roofH)
+  const angle = Math.atan2(roofH, roofW/2)
+  
+  const slopeGeo = new THREE.BoxGeometry(slopeLen, 0.15, roofD)
+  
+  const slopeL = new THREE.Mesh(slopeGeo, pvMat)
+  slopeL.position.set(-roofW/4, roofH/2, 0)
+  slopeL.rotation.z = angle
+  slopeL.castShadow = true; slopeL.receiveShadow = true;
+  
+  const slopeR = new THREE.Mesh(slopeGeo, pvMat)
+  slopeR.position.set(roofW/4, roofH/2, 0)
+  slopeR.rotation.z = -angle
+  slopeR.castShadow = true; slopeR.receiveShadow = true;
+  
+  const pvRoofGroup = new THREE.Group()
+  pvRoofGroup.add(slopeL)
+  pvRoofGroup.add(slopeR)
+  pvRoofGroup.position.set(0, 7.65, 0)
+  buildingGroup.add(pvRoofGroup)
+
+  // 窗户生成（科技蓝玻璃）
+  function addWindows(group, cols, startY, width, height, zOffset, skipCenter = false) {
+    for (let c = 0; c < cols; c++) {
+      if (skipCenter && (c === 1 || c === 2)) continue;
+      const win = new THREE.Mesh(new THREE.BoxGeometry(width, height, 0.15), windowMat)
+      win.position.set(-5.4 + c * 3.6, startY, zOffset)
+      win.castShadow = true
+      group.add(win)
+    }
+  }
+  
+  addWindows(buildingGroup, 4, 2.25, 2.0, 2.2, 5.08, true)
+  addWindows(buildingGroup, 4, 5.65, 2.0, 2.0, 5.08, false)
+  addWindows(buildingGroup, 4, 2.25, 2.0, 2.2, -5.08, false)
+  addWindows(buildingGroup, 4, 5.65, 2.0, 2.0, -5.08, false)
+
+  // ========== 一楼正门（科技自动门） ==========
+  const doorGroup = new THREE.Group()
+
+  const doorFrame = new THREE.Mesh(new THREE.BoxGeometry(3.2, 3.2, 0.3), metalMat)
+  doorFrame.position.set(0, 1.6, 5.05)
+  doorFrame.castShadow = true
+  doorGroup.add(doorFrame)
+
+  // 透明玻璃门扇（发光蓝）
+  const doorPanelL = new THREE.Mesh(new THREE.BoxGeometry(1.45, 2.8, 0.1), doorMat)
+  doorPanelL.position.set(-0.75, 1.5, 5.12)
+  doorPanelL.castShadow = true
+  doorGroup.add(doorPanelL)
+
+  const doorPanelR = new THREE.Mesh(new THREE.BoxGeometry(1.45, 2.8, 0.1), doorMat)
+  doorPanelR.position.set(0.75, 1.5, 5.12)
+  doorPanelR.castShadow = true
+  doorGroup.add(doorPanelR)
+
+  // 门把手（发光条）
+  const handleGeo = new THREE.BoxGeometry(0.04, 2.0, 0.04)
+  const handleMat = new THREE.MeshStandardMaterial({ color: 0x00FFFF, emissive: 0x00FFFF, emissiveIntensity: 2.0 })
+  
+  const handleL = new THREE.Mesh(handleGeo, handleMat)
+  handleL.position.set(-1.4, 1.5, 5.18)
+  doorGroup.add(handleL)
+
+  const handleR = new THREE.Mesh(handleGeo, handleMat)
+  handleR.position.set(1.4, 1.5, 5.18)
+  doorGroup.add(handleR)
+
+  // 雨棚（带有发光底边）
+  const canopy = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.15, 1.8), metalMat)
+  canopy.position.set(0, 3.4, 5.5)
+  canopy.castShadow = true
+  doorGroup.add(canopy)
+
+  // 雨棚发光条
+  const canopyLight = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.05, 1.8), handleMat)
+  canopyLight.position.set(0, 3.3, 5.5)
+  doorGroup.add(canopyLight)
+
+  // 门头台阶
+  const step1 = new THREE.Mesh(new THREE.BoxGeometry(4.0, 0.15, 0.8), concreteMat)
+  step1.position.set(0, 0.5, 5.5)
+  step1.castShadow = true
+  step1.receiveShadow = true
+  doorGroup.add(step1)
+
+  const step2 = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.15, 0.6), concreteMat)
+  step2.position.set(0, 0.35, 5.8)
+  step2.castShadow = true
+  step2.receiveShadow = true
+  doorGroup.add(step2)
+
+  scene.add(buildingGroup)
+  scene.add(doorGroup)
+
+  // ========== 左侧弧形旋转楼梯（发光科技感） ==========
+  const stairGroup = new THREE.Group()
+  
+  const spiralRadius = 2.2
+  const spiralCenterX = -10
+  const spiralCenterZ = 0
+  const steps = 45 
+  const totalHeight = 7.45 
+  const stepHeight = totalHeight / steps
+  const stepAngle = (Math.PI * 1.5) / steps 
+
+  const centralPillar = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.2, 0.25, totalHeight, 16),
+    metalMat
   )
-  longPanel.position.set(0, 1.9 + 5 + parapetH / 2, 6.1)
-  scene.add(longPanel)
-  const longPanelBack = longPanel.clone()
-  longPanelBack.position.z = -6.1
-  scene.add(longPanelBack)
-  const shortPanel = new THREE.Mesh(
-    new THREE.BoxGeometry(parapetT, parapetH, 12.4),
-    railingMat
+  centralPillar.position.set(spiralCenterX, totalHeight / 2, spiralCenterZ)
+  centralPillar.castShadow = true
+  stairGroup.add(centralPillar)
+
+  // 发光条材质
+  const glowMat = new THREE.MeshStandardMaterial({
+    color: 0x00FFFF,
+    emissive: 0x00FFFF,
+    emissiveIntensity: 2.0,
+    roughness: 0.1,
+    metalness: 0.5
+  })
+
+  // 生成螺旋踏步（去掉顶部台阶，并添加发光条）
+  for (let i = 0; i < steps - 1; i++) {
+    const angle = Math.PI * 2 - i * stepAngle
+    const y = i * stepHeight + stepHeight / 2
+
+    const stepGeo = new THREE.BoxGeometry(1.8, 0.08, 0.4)
+    const step = new THREE.Mesh(stepGeo, metalMat)
+    
+    step.position.set(
+      spiralCenterX + Math.sin(angle) * spiralRadius,
+      y,
+      spiralCenterZ + Math.cos(angle) * spiralRadius
+    )
+    step.rotation.y = -angle
+    step.castShadow = true
+    step.receiveShadow = true
+    stairGroup.add(step)
+
+    // 踏步发光条（科技感细节）
+    const glowStrip = new THREE.Mesh(new THREE.BoxGeometry(1.8, 0.02, 0.05), glowMat)
+    glowStrip.position.set(
+      spiralCenterX + Math.sin(angle) * spiralRadius,
+      y + 0.05,
+      spiralCenterZ + Math.cos(angle) * spiralRadius
+    )
+    glowStrip.rotation.y = -angle
+    stairGroup.add(glowStrip)
+
+    const railPost = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.04, 0.04, 1.0, 8),
+      metalMat
+    )
+    railPost.position.set(
+      spiralCenterX + Math.sin(angle) * (spiralRadius + 0.8),
+      y + 0.5,
+      spiralCenterZ + Math.cos(angle) * (spiralRadius + 0.8)
+    )
+    railPost.castShadow = true
+    stairGroup.add(railPost)
+  }
+
+  // 弧形金属扶手（与台阶同步截止）
+  const curvePoints = []
+  for (let i = 0; i <= steps - 2; i++) {
+    const angle = Math.PI * 2 - i * stepAngle
+    const y = i * stepHeight + stepHeight / 2
+    curvePoints.push(new THREE.Vector3(
+      spiralCenterX + Math.sin(angle) * (spiralRadius + 0.8),
+      y + 1.0,
+      spiralCenterZ + Math.cos(angle) * (spiralRadius + 0.8)
+    ))
+  }
+  const helixCurve = new THREE.CatmullRomCurve3(curvePoints)
+  const handrailGeo = new THREE.TubeGeometry(helixCurve, 80, 0.06, 8, false)
+  const handrail = new THREE.Mesh(handrailGeo, metalMat)
+  handrail.castShadow = true
+  stairGroup.add(handrail)
+
+  // 扶手发光带
+  const handrailGlowGeo = new THREE.TubeGeometry(helixCurve, 80, 0.02, 8, false)
+  const handrailGlow = new THREE.Mesh(handrailGlowGeo, glowMat)
+  handrailGlow.position.y = 0.05
+  stairGroup.add(handrailGlow)
+
+  scene.add(stairGroup)
+
+  // ========== 楼顶连接平台 ==========
+  const landingPlatform = new THREE.Mesh(
+    new THREE.BoxGeometry(1.5, 0.2, 3.0),
+    metalMat
   )
-  shortPanel.position.set(3.7, 1.9 + 5 + parapetH / 2, 0)
-  scene.add(shortPanel)
-  const shortPanelL = shortPanel.clone()
-  shortPanelL.position.x = -3.7
-  scene.add(shortPanelL)
+  landingPlatform.position.set(-7.25, 7.45, 0) 
+  landingPlatform.castShadow = true
+  landingPlatform.receiveShadow = true
+  scene.add(landingPlatform)
 
-  const topBeamMat = new THREE.MeshStandardMaterial({ color: 0x8C8278, roughness: 0.7, metalness: 0.15 })
-  const topBeamLong = new THREE.Mesh(new THREE.BoxGeometry(7.4, 0.12, 0.24), topBeamMat)
-  topBeamLong.position.set(0, 1.9 + 5 + parapetH, 6.1)
-  scene.add(topBeamLong)
-  const topBeamLongB = topBeamLong.clone()
-  topBeamLongB.position.z = -6.1
-  scene.add(topBeamLongB)
-  const topBeamShort = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.12, 12.4), topBeamMat)
-  topBeamShort.position.set(3.7, 1.9 + 5 + parapetH, 0)
-  scene.add(topBeamShort)
-  const topBeamShortL = topBeamShort.clone()
-  topBeamShortL.position.x = -3.7
-  scene.add(topBeamShortL)
+  // 平台发光边缘
+  const platformGlow = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.05, 3.0), glowMat)
+  platformGlow.position.set(-7.25, 7.55, 0)
+  scene.add(platformGlow)
 
-  // ---------- 楼顶机房 ----------
-  const roofMat = new THREE.MeshStandardMaterial({ color: 0x9E958A, roughness: 0.72, metalness: 0.18 })
-  const roofRoom = new THREE.Mesh(new THREE.BoxGeometry(2.7, 1.3, 3.3), roofMat)
-  roofRoom.position.set(-1.2, 1.9 + 5 + 0.65, 1.4)
-  scene.add(roofRoom)
+  // 楼顶护栏
+  const railMat = metalMat.clone()
+  railMat.color.setHex(0xCCCCCC)
+  railMat.metalness = 0.9
+  railMat.roughness = 0.2
 
-  // ---------- 楼顶水箱 ----------
-  const tankMat = new THREE.MeshStandardMaterial({ color: 0x6B8E9E, roughness: 0.5, metalness: 0.45 })
-  const tank = new THREE.Mesh(new THREE.CylinderGeometry(0.62, 0.62, 1.5, 18), tankMat)
-  tank.position.set(1.9, 1.9 + 5 + 0.75, -3.4)
-  scene.add(tank)
+  function addRoofRail(x, z, len, isX) {
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(isX ? len : 0.1, 1.0, isX ? 0.1 : len), railMat)
+    rail.position.set(x, 8.0, z)
+    rail.castShadow = true
+    scene.add(rail)
+  }
+  addRoofRail(0, 5.2, 14.4, true) // 前
+  addRoofRail(0, -5.2, 14.4, true) // 后
+  addRoofRail(7.2, 0, 10.4, false) // 右
 
-  // ---------- 4 个发光锚点 ----------
-  const glowTex = makeGlowTexture()
-  const sphereGeo = new THREE.SphereGeometry(0.26, 18, 18)
+  // ========== 锚点标注 ==========
+  const glowCanvas = document.createElement('canvas')
+  glowCanvas.width = 128
+  glowCanvas.height = 128
+  const gctx = glowCanvas.getContext('2d')
+  const grad = gctx.createRadialGradient(64, 64, 0, 64, 64, 64)
+  grad.addColorStop(0, 'rgba(255,255,255,1)')
+  grad.addColorStop(0.3, 'rgba(255,255,255,0.6)')
+  grad.addColorStop(1, 'rgba(255,255,255,0)')
+  gctx.fillStyle = grad
+  gctx.fillRect(0, 0, 128, 128)
+  const glowTex = new THREE.CanvasTexture(glowCanvas)
+  const sphereGeo = new THREE.SphereGeometry(0.25, 16, 16)
 
   BUILDING_NODES.forEach((data) => {
     const color = TONE_COLORS[data.tone] ?? TONE_COLORS.blue
 
-    const mesh = new THREE.Mesh(
-      sphereGeo,
-      new THREE.MeshBasicMaterial({ color })
-    )
-    mesh.position.set(data.pos[0], data.pos[1], data.pos[2])
+    const mesh = new THREE.Mesh(sphereGeo, new THREE.MeshBasicMaterial({ color }))
+    mesh.position.set(data.pos[0] * 2.2, data.pos[1] * 1.1 + 0.5, data.pos[2] * 1.1)
     mesh.userData.nodeId = data.id
     scene.add(mesh)
 
@@ -388,16 +678,16 @@ function buildScene(Controls) {
         map: glowTex,
         color,
         transparent: true,
-        opacity: 0.75,
+        opacity: 0.8,
         blending: THREE.AdditiveBlending,
         depthWrite: false
       })
     )
-    glow.scale.set(2.4, 2.4, 1)
+    glow.scale.set(2.2, 2.2, 1)
     glow.position.copy(mesh.position)
     scene.add(glow)
 
-    const normal = new THREE.Vector3(data.pos[0], 0, data.pos[2])
+    const normal = new THREE.Vector3(data.pos[0] * 2.2, 0, data.pos[2] * 1.1)
     if (normal.lengthSq() === 0) normal.set(0, 0, 1)
     normal.normalize()
 
@@ -405,34 +695,12 @@ function buildScene(Controls) {
       data,
       mesh,
       glow,
-      world: new THREE.Vector3(data.pos[0], data.pos[1], data.pos[2]),
+      world: new THREE.Vector3(data.pos[0] * 2.2, data.pos[1] * 1.1 + 0.5, data.pos[2] * 1.1),
       normal
     })
   })
 
-  // ---------- 自动按包围盒居中（忽略底座与网格） ----------
-  const box = new THREE.Box3()
-  scene.traverse((obj) => {
-    if (obj.isMesh && obj !== base && obj !== ring) {
-      box.expandByObject(obj)
-    }
-  })
-  if (!box.isEmpty()) {
-    const center = box.getCenter(new THREE.Vector3())
-    const size = box.getSize(new THREE.Vector3())
-    const maxDim = Math.max(size.x, size.y, size.z)
-    const fitDist = maxDim / (2 * Math.tan((camera.fov * Math.PI) / 360))
-
-    controls.target.copy(center)
-    camera.position.copy(center).add(
-      new THREE.Vector3(fitDist * 0.95, fitDist * 0.75, fitDist * 1.15)
-    )
-    controls.minDistance = fitDist * 0.55
-    controls.maxDistance = fitDist * 3.2
-    controls.update()
-  }
-
-  // 点击锚点小球打开信息面板
+  // ========== 点击检测 ==========
   const raycaster = new THREE.Raycaster()
   const pointer = new THREE.Vector2()
   renderer.domElement.addEventListener('pointerdown', (e) => {
@@ -443,11 +711,16 @@ function buildScene(Controls) {
     const hit = raycaster.intersectObjects(nodes.map((n) => n.mesh), false)[0]
     if (!hit) return
     const node = nodes.find((n) => n.mesh === hit.object)
-    if (node) active.value = node.data
+    if (node) {
+      active.value = node.data
+      // 触发动画
+      panelScale.value = 0
+      setTimeout(() => { panelScale.value = 1 }, 10)
+    }
   })
 }
 
-// 每帧把锚点投影到屏幕，更新 HTML 标签位置与背面显隐
+// 每帧把锚点投影到屏幕
 function updateLabels() {
   if (!host) return
   const w = host.clientWidth
@@ -466,6 +739,18 @@ function updateLabels() {
     const facing = !behind && toCamera.dot(node.normal) > 0.35
     if (visible.value[i] !== facing) visible.value[i] = facing
   })
+
+  // 更新弹窗位置（跟随当前激活的点位）
+  if (active.value) {
+    const node = nodes.find(n => n.data.id === active.value.id)
+    if (node) {
+      const p = node.world.clone().project(camera)
+      const x = (p.x * 0.5 + 0.5) * w
+      const y = (-p.y * 0.5 + 0.5) * h
+      // 弹窗在点位右侧，稍微偏上
+      panelPos.value = { x: x + 20, y: y - 30 }
+    }
+  }
 }
 
 function resize() {
@@ -475,13 +760,12 @@ function resize() {
   if (w === 0 || h === 0) return
   camera.aspect = w / h
   camera.updateProjectionMatrix()
-  // 注意：去掉第三个 false，让 canvas 的 CSS 尺寸与容器同步，避免高分屏下溢出
   renderer.setSize(w, h)
 }
 
 function tick() {
   rafId = requestAnimationFrame(tick)
-  controls.update()
+  controls?.update()
   renderer.render(scene, camera)
   updateLabels()
 }
@@ -494,10 +778,15 @@ function disposeScene() {
         const mats = Array.isArray(obj.material) ? obj.material : [obj.material]
         mats.forEach((m) => {
           if (m.map) m.map.dispose()
+          if (m.envMap) m.envMap.dispose()
           m.dispose()
         })
       }
     })
+  }
+  if (pmremGenerator) {
+    pmremGenerator.dispose()
+    pmremGenerator = null
   }
   if (controls) {
     controls.dispose()
@@ -524,7 +813,7 @@ onMounted(async () => {
     THREE = three
     buildScene(OrbitControls)
   } catch (err) {
-    console.error('[Building3D] three.js 初始化失败，已降级为静态标注列表', err)
+    console.error('[Building3D] three.js 初始化失败', err)
     failed.value = true
     return
   }
@@ -555,7 +844,6 @@ onBeforeUnmount(() => {
   <div class="b3d-root">
     <div ref="hostEl" class="b3d-canvas"></div>
 
-    <!-- 锚点标签层（每帧投影定位） -->
     <div v-if="!failed" class="b3d-labels" aria-hidden="false">
       <button
         v-for="(node, i) in BUILDING_NODES"
@@ -588,10 +876,10 @@ onBeforeUnmount(() => {
       :tone="active.tone"
       :rows="active.rows"
       :note="DATA_NOTE"
-      @close="active = null"
+      :style="{ left: `${panelPos.x}px`, top: `${panelPos.y}px`, transform: `scale(${panelScale})` }"
+      @close="active = null; panelScale = 0"
     />
 
-    <!-- three.js 不可用时的降级视图 -->
     <div v-if="failed" class="b3d-fallback" role="status">
       <h2 class="b3d-fallback-title">3D 楼宇暂时无法加载</h2>
       <p class="b3d-fallback-desc">已降级为静态标注入口，点击下方按钮仍可查看各标注点信息。</p>
@@ -612,57 +900,88 @@ onBeforeUnmount(() => {
   position: absolute;
   inset: 0;
   overflow: hidden;
-  background:
-    radial-gradient(120% 80% at 50% 0%, #1B3E5E 0%, #102637 46%, #081522 100%);
+  background: radial-gradient(120% 80% at 50% 0%, #0A101A 0%, #1A2A3A 50%, #0A101A 100%);
 }
 .b3d-canvas { position: absolute; inset: 0; }
-
-/* 关键修复：强制 canvas 填满容器，避免高分屏下 2 倍尺寸溢出 */
 .b3d-canvas canvas {
   display: block;
   width: 100% !important;
   height: 100% !important;
 }
 
-/* ---------- 锚点标签 ---------- */
 .b3d-labels { position: absolute; inset: 0; pointer-events: none; }
 .b3d-label {
   position: absolute;
-  top: 0;
-  left: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 11px 5px 9px;
+  top: 0; left: 0;
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 12px 6px 10px;
   font-family: var(--font);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: .04em;
+  font-size: 11px; font-weight: 700; letter-spacing: .08em;
   white-space: nowrap;
   color: var(--tone-text);
   cursor: pointer;
-  background: var(--tone-bg);
+  background: linear-gradient(135deg, var(--tone-bg) 0%, rgba(10,20,30,.9) 100%);
   border: 1px solid var(--tone-border);
-  border-radius: 999px;
-  box-shadow: 0 6px 18px rgba(3,10,20,.5), 0 0 14px var(--tone-glow);
-  backdrop-filter: blur(6px);
+  border-left: 3px solid var(--tone-accent, currentColor);
+  border-radius: 4px;
+  box-shadow:
+    0 4px 20px rgba(0,0,0,.4),
+    0 0 12px var(--tone-glow),
+    inset 0 1px 0 rgba(255,255,255,.05);
+  backdrop-filter: blur(8px);
   pointer-events: auto;
   transform: translate(-50%, -50%);
-  transition: opacity .22s ease, box-shadow .18s, border-color .18s;
+  transition: all .2s ease;
 }
-.b3d-label:hover { border-color: var(--tone-text); box-shadow: 0 8px 22px rgba(3,10,20,.6), 0 0 22px var(--tone-glow); }
+.b3d-label:hover {
+  border-left-color: var(--tone-text);
+  box-shadow:
+    0 6px 28px rgba(0,0,0,.5),
+    0 0 20px var(--tone-glow),
+    inset 0 1px 0 rgba(255,255,255,.1);
+  transform: translate(-50%, -50%) scale(1.05);
+}
 .b3d-label-dot {
-  width: 7px; height: 7px; border-radius: 50%;
-  background: currentColor;
-  box-shadow: 0 0 9px currentColor;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--tone-accent, currentColor);
+  box-shadow: 0 0 8px var(--tone-accent, currentColor), 0 0 16px var(--tone-glow);
   flex: none;
+  animation: techPulse 2s ease-in-out infinite;
 }
-.b3d-label.is-blue { --tone-text: #9BDDF8; --tone-bg: rgba(18,50,74,.86); --tone-border: rgba(70,168,214,.6); --tone-glow: rgba(70,168,214,.34); }
-.b3d-label.is-green { --tone-text: #86E2AF; --tone-bg: rgba(17,54,42,.86); --tone-border: rgba(91,201,140,.6); --tone-glow: rgba(91,201,140,.34); }
-.b3d-label.is-amber { --tone-text: #F0CE86; --tone-bg: rgba(60,47,18,.86); --tone-border: rgba(224,176,76,.6); --tone-glow: rgba(224,176,76,.34); }
-.b3d-label.is-red { --tone-text: #F2A6A2; --tone-bg: rgba(62,26,26,.86); --tone-border: rgba(227,112,107,.6); --tone-glow: rgba(227,112,107,.34); }
+@keyframes techPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .6; transform: scale(1.3); }
+}
+.b3d-label.is-blue {
+  --tone-text: #00D4FF;
+  --tone-bg: rgba(0,30,60,.88);
+  --tone-border: rgba(0,212,255,.4);
+  --tone-accent: #00D4FF;
+  --tone-glow: rgba(0,212,255,.35);
+}
+.b3d-label.is-green {
+  --tone-text: #00FF88;
+  --tone-bg: rgba(0,40,20,.88);
+  --tone-border: rgba(0,255,136,.4);
+  --tone-accent: #00FF88;
+  --tone-glow: rgba(0,255,136,.35);
+}
+.b3d-label.is-amber {
+  --tone-text: #FFAA00;
+  --tone-bg: rgba(50,35,0,.88);
+  --tone-border: rgba(255,170,0,.4);
+  --tone-accent: #FFAA00;
+  --tone-glow: rgba(255,170,0,.35);
+}
+.b3d-label.is-red {
+  --tone-text: #FF3366;
+  --tone-bg: rgba(60,10,20,.88);
+  --tone-border: rgba(255,51,102,.4);
+  --tone-accent: #FF3366;
+  --tone-glow: rgba(255,51,102,.35);
+}
 
-/* ---------- 顶部工具条 ---------- */
 .b3d-toolbar {
   position: absolute;
   top: 0; left: 0; right: 0;
@@ -674,33 +993,30 @@ onBeforeUnmount(() => {
   display: flex; align-items: center; gap: 6px;
   padding: 9px 16px;
   font-family: var(--font); font-size: 12.5px; font-weight: 600;
-  letter-spacing: .05em; color: #EAF6FF; cursor: pointer;
-  background: rgba(19,42,63,.8);
-  border: 1px solid rgba(143,216,247,.36);
+  letter-spacing: .05em; color: #1A2A3A; cursor: pointer;
+  background: rgba(255,255,255,.85);
+  border: 1px solid rgba(100,150,200,.4);
   border-radius: 9px;
   backdrop-filter: blur(6px);
-  box-shadow: 0 8px 20px rgba(3,10,20,.4);
+  box-shadow: 0 4px 12px rgba(0,0,0,.15);
   pointer-events: auto;
   transition: border-color .18s, transform .18s;
 }
-.b3d-back:hover { border-color: #8FD8F7; transform: translateY(-1px); }
+.b3d-back:hover { border-color: #46A8D6; transform: translateY(-1px); }
 .b3d-hint {
   font-size: 11.5px;
   letter-spacing: .08em;
-  color: rgba(198,222,238,.6);
+  color: rgba(40,60,80,.7);
 }
 
-/* ---------- 降级视图 ---------- */
 .b3d-fallback {
-  position: absolute;
-  inset: 0;
+  position: absolute; inset: 0;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 12px;
-  padding: 0 24px;
-  text-align: center;
+  gap: 12px; padding: 0 24px; text-align: center;
+  background: rgba(240,248,255,.95);
 }
-.b3d-fallback-title { font-size: 17px; font-weight: 600; color: #EAF6FF; }
-.b3d-fallback-desc { font-size: 12.5px; color: rgba(198,222,238,.72); }
+.b3d-fallback-title { font-size: 17px; font-weight: 600; color: #1A2A3A; }
+.b3d-fallback-desc { font-size: 12.5px; color: rgba(40,60,80,.72); }
 .b3d-fallback-list {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px; margin-top: 10px; padding: 0; list-style: none;
@@ -710,16 +1026,15 @@ onBeforeUnmount(() => {
   padding: 10px 18px;
   font-family: var(--font); font-size: 12.5px; font-weight: 600;
   color: var(--tone-text); cursor: pointer;
-  background: var(--tone-bg);
-  border: 1px solid var(--tone-border);
+  background: var(--tone-bg); border: 1px solid var(--tone-border);
   border-radius: 10px;
   transition: transform .18s, border-color .18s;
 }
 .b3d-fallback-btn:hover { transform: translateY(-1px); border-color: var(--tone-text); }
-.b3d-fallback-btn.is-blue { --tone-text: #9BDDF8; --tone-bg: rgba(18,50,74,.86); --tone-border: rgba(70,168,214,.6); }
-.b3d-fallback-btn.is-green { --tone-text: #86E2AF; --tone-bg: rgba(17,54,42,.86); --tone-border: rgba(91,201,140,.6); }
-.b3d-fallback-btn.is-amber { --tone-text: #F0CE86; --tone-bg: rgba(60,47,18,.86); --tone-border: rgba(224,176,76,.6); }
-.b3d-fallback-btn.is-red { --tone-text: #F2A6A2; --tone-bg: rgba(62,26,26,.86); --tone-border: rgba(227,112,107,.6); }
+.b3d-fallback-btn.is-blue { --tone-text: #1A6B9A; --tone-bg: rgba(200,230,250,.9); --tone-border: rgba(70,168,214,.6); }
+.b3d-fallback-btn.is-green { --tone-text: #2A7A4A; --tone-bg: rgba(200,240,220,.9); --tone-border: rgba(91,201,140,.6); }
+.b3d-fallback-btn.is-amber { --tone-text: #8A6A1A; --tone-bg: rgba(250,240,200,.9); --tone-border: rgba(224,176,76,.6); }
+.b3d-fallback-btn.is-red { --tone-text: #8A2A2A; --tone-bg: rgba(250,220,215,.9); --tone-border: rgba(227,112,107,.6); }
 
 @media (max-width: 720px) {
   .b3d-hint { display: none; }
@@ -727,5 +1042,14 @@ onBeforeUnmount(() => {
 }
 @media (prefers-reduced-motion: reduce) {
   .b3d-label, .b3d-back, .b3d-fallback-btn { transition: none; }
+  .info-panel { animation: none !important; transform: none !important; }
+}
+
+/* 弹窗跟随动画 */
+.info-panel {
+  position: absolute;
+  transition: left 0.1s ease-out, top 0.1s ease-out, transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform-origin: top left;
+  will-change: transform;
 }
 </style>

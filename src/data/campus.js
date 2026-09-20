@@ -40,13 +40,13 @@ export const CAMPUSES = [
   }
 ]
 
-// 4 个 3D 标注点：位置贴合主楼外表面（主楼 7 宽 × 12 深 × 5 高）
+// 4 个 3D 标注点：靠近建筑外墙，悬浮于不同高度
 export const BUILDING_NODES = [
   {
     id: 'system',
     tone: 'blue',
     title: '能源楼系统',
-    pos: [0, 3.4, 6.5],
+    pos: [-7, 5.5, 5.5],
     rows: [
       { label: '运行状态', value: '运行正常', state: 'ok' },
       { label: '光伏出力', value: '86 kW' },
@@ -59,7 +59,7 @@ export const BUILDING_NODES = [
     id: 'energy',
     tone: 'green',
     title: '能源楼用能信息',
-    pos: [4.0, 3.4, 0],
+    pos: [7, 4.0, 5.5],
     rows: [
       { label: '今日用电', value: '4.86 MWh' },
       { label: '空调', value: '42 %' },
@@ -72,7 +72,7 @@ export const BUILDING_NODES = [
     id: 'device',
     tone: 'amber',
     title: '能源楼设备状态',
-    pos: [0, 3.4, -6.5],
+    pos: [-7, 5.0, -5.5],
     rows: [
       { label: '变压器 ×2', value: '运行', state: 'ok' },
       { label: '冷水机组', value: '运行', state: 'ok' },
@@ -85,7 +85,7 @@ export const BUILDING_NODES = [
     id: 'alarm',
     tone: 'red',
     title: '能源楼能耗告警',
-    pos: [-4.0, 3.4, 0],
+    pos: [7, 6.5, -5.5],
     rows: [
       { label: '09:24', value: '3F 空调回路功率越上限', state: 'warn' },
       { label: '11:02', value: '储能 PCS 通讯短时中断', state: 'warn' },

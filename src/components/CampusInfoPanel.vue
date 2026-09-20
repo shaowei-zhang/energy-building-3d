@@ -37,8 +37,7 @@ const emit = defineEmits(['close'])
 <style scoped>
 .info-panel {
   position: absolute;
-  right: 26px;
-  bottom: 26px;
+  left: 0; top: 0;
   z-index: 820;
   width: 268px;
   padding: 14px 16px 12px;
@@ -48,7 +47,6 @@ const emit = defineEmits(['close'])
   border-radius: 14px;
   box-shadow: 0 18px 44px rgba(4,12,22,.55), 0 0 24px var(--tone-glow);
   backdrop-filter: blur(8px);
-  animation: panelIn .34s cubic-bezier(.22,1.3,.44,1) both;
 }
 .info-panel.is-blue { --tone: #46A8D6; --tone-border: rgba(70,168,214,.55); --tone-glow: rgba(70,168,214,.22); }
 .info-panel.is-green { --tone: #5BC98C; --tone-border: rgba(91,201,140,.55); --tone-glow: rgba(91,201,140,.22); }
@@ -100,12 +98,7 @@ const emit = defineEmits(['close'])
   text-align: center;
 }
 
-@keyframes panelIn {
-  from { opacity: 0; transform: translateY(14px) scale(.96); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .info-panel { animation: none !important; }
+  .info-panel { transition: none; }
 }
 </style>
