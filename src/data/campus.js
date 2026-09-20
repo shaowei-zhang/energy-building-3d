@@ -4,7 +4,7 @@
 export const CAMPUSES = [
   {
     id: 'xikanglu',
-    name: '南京 - 河海大学 - 西康路联合',
+    name: '南京 - 河海大学 - 西康路校区',
     short: '西康路校区',
     city: '南京',
     district: '鼓楼区',
@@ -28,7 +28,7 @@ export const CAMPUSES = [
   },
   {
     id: 'changzhou',
-    name: '常州 - 河海大学 - 常州联合',
+    name: '常州 - 河海大学 - 常州校区',
     short: '常州校区',
     city: '常州',
     district: '金坛区',
@@ -71,7 +71,7 @@ export const BUILDING_NODES = [
   {
     id: 'device',
     tone: 'amber',
-    title: '能源楼设备状态',
+    title: '能源楼仿真系统',
     pos: [-7, 5.0, -5.5],
     rows: [
       { label: '变压器 ×2', value: '运行', state: 'ok' },

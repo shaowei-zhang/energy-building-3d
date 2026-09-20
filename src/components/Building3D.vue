@@ -11,10 +11,21 @@ const active = ref(null)
 const panelPos = ref({ x: 0, y: 0 })
 const visible = ref(BUILDING_NODES.map(() => true))
 const panelScale = ref(0)
+const isEmbedPanel = ref(false) // 是否为 iframe 嵌入面板
+const EMBED_URL = 'http://localhost:5173/?campus=%E5%B8%B8%E5%B7%9E-%E6%B2%B3%E6%B5%B7%E5%A4%A7%E5%AD%A6-%E5%B8%B8%E5%B7%9E%E6%A0%A1%E5%8C%BA'
 
-// 统一打开弹窗的方法
+// 统一打开弹窗的方法（能源楼仿真系统特殊处理：嵌入 iframe）
 function openPanel(node) {
+  if (node.id === 'device') {
+    // 能源楼仿真系统 → 固定居中显示 iframe
+    active.value = node
+    isEmbedPanel.value = true
+    panelScale.value = 0
+    setTimeout(() => { panelScale.value = 1 }, 50)
+    return
+  }
   active.value = node
+  isEmbedPanel.value = false
   panelScale.value = 0
   setTimeout(() => { panelScale.value = 1 }, 50)
 }
@@ -880,8 +891,26 @@ onBeforeUnmount(() => {
       :rows="active.rows"
       :note="DATA_NOTE"
       :style="{ left: `${panelPos.x}px`, top: `${panelPos.y}px`, transform: `scale(${panelScale})` }"
-      @close="active = null; panelScale = 0"
+      @close="active = null; panelScale = 0; isEmbedPanel = false"
     />
+
+    <!-- 能源楼仿真系统：iframe 嵌入弹窗 -->
+    <div
+      v-if="active && active.id === 'device'"
+      class="embed-panel"
+      :style="{ transform: `scale(${panelScale})` }"
+    >
+      <div class="embed-panel-header">
+        <span class="embed-panel-title">能源楼仿真系统</span>
+        <button class="embed-panel-close" @click="active = null; panelScale = 0; isEmbedPanel = false">×</button>
+      </div>
+      <iframe
+        :src="EMBED_URL"
+        class="embed-panel-frame"
+        sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
+        loading="lazy"
+      />
+    </div>
 
     <div v-if="failed" class="b3d-fallback" role="status">
       <h2 class="b3d-fallback-title">3D 楼宇暂时无法加载</h2>
@@ -1057,5 +1086,73 @@ onBeforeUnmount(() => {
   transition: left 0.08s linear, top 0.08s linear, transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
   transform-origin: top left;
   will-change: transform, left, top;
+}
+
+/* 嵌入 iframe 弹窗 */
+.embed-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  width: 90vw;
+  height: 85vh;
+  max-width: 1400px;
+  max-height: 900px;
+  margin: auto;
+  background: #0f1923;
+  border: 1px solid rgba(0, 212, 255, 0.5);
+  border-radius: 8px;
+  box-shadow: 0 0 40px rgba(0, 212, 255, 0.3), inset 0 0 40px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  transform-origin: center;
+  animation: popIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  transition: left 0.08s linear, top 0.08s linear;
+  display: flex;
+  flex-direction: column;
+}
+@keyframes popIn {
+  from { opacity: 0; transform: scale(0.5); }
+  to   { opacity: 1; transform: scale(1); }
+}
+.embed-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  height: 40px;
+  background: linear-gradient(90deg, rgba(0,212,255,0.25) 0%, rgba(0,100,150,0.15) 100%);
+  border-bottom: 1px solid rgba(0, 212, 255, 0.4);
+  flex-shrink: 0;
+}
+.embed-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #00d4ff;
+  letter-spacing: 1px;
+  text-shadow: 0 0 8px rgba(0, 212, 255, 0.6);
+}
+.embed-panel-close {
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(0, 212, 255, 0.5);
+  border-radius: 4px;
+  background: rgba(0, 212, 255, 0.1);
+  color: #00d4ff;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background .18s, border-color .18s;
+}
+.embed-panel-close:hover {
+  background: rgba(0, 212, 255, 0.3);
+  border-color: #00d4ff;
+}
+.embed-panel-frame {
+  flex: 1;
+  border: none;
+  width: 100%;
+  background: #0f1923;
 }
 </style>
