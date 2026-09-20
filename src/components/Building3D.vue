@@ -12,22 +12,118 @@ const panelPos = ref({ x: 0, y: 0 })
 const visible = ref(BUILDING_NODES.map(() => true))
 const panelScale = ref(0)
 const isEmbedPanel = ref(false) // 是否为 iframe 嵌入面板
+const embedUrl = ref('') // 当前嵌入面板的地址
+const iframeEl = ref(null)
 const EMBED_URL = 'http://localhost:5173/?campus=%E5%B8%B8%E5%B7%9E-%E6%B2%B3%E6%B5%B7%E5%A4%A7%E5%AD%A6-%E5%B8%B8%E5%B7%9E%E6%A0%A1%E5%8C%BA'
 
-// 统一打开弹窗的方法（能源楼仿真系统特殊处理：嵌入 iframe）
+// 能源楼系统（校园管理平台）：经 Vite 同源代理访问，路径与代理配置见 vite.config.js。
+// iframe 与主页面同源，加载完成后可注入账号密码自动填充
+const SYSTEM_LOGIN_PATH = '/energy-sys/login'
+const SYSTEM_ACCOUNT = {
+  username: 'nengyuanlou',
+  password: 'Z2120433323sw!'
+}
+// 能源楼用能信息大屏（ZKView 可视化）：HTTP 可直接跨域 iframe 嵌入，无需账号密码
+const ENERGY_DASHBOARD_URL = 'http://124.70.203.226:8250/'
+
+// 统一打开弹窗的方法：
+// - 能源楼仿真系统(device) → iframe 嵌入本地面板
+// - 能源楼系统(system) → iframe 嵌入校园管理平台登录页，并自动填充账号密码
+// - 能源楼用能信息(energy) → iframe 嵌入用能信息大屏，无需账号密码
+// - 其余节点 → 普通信息面板
 function openPanel(node) {
+  active.value = node
+  panelScale.value = 0
   if (node.id === 'device') {
-    // 能源楼仿真系统 → 固定居中显示 iframe
-    active.value = node
     isEmbedPanel.value = true
-    panelScale.value = 0
-    setTimeout(() => { panelScale.value = 1 }, 50)
+    embedUrl.value = EMBED_URL
+  } else if (node.id === 'system') {
+    isEmbedPanel.value = true
+    embedUrl.value = SYSTEM_LOGIN_PATH
+  } else if (node.id === 'energy') {
+    isEmbedPanel.value = true
+    embedUrl.value = ENERGY_DASHBOARD_URL
+  } else {
+    isEmbedPanel.value = false
+  }
+  setTimeout(() => { panelScale.value = 1 }, 50)
+}
+
+// 关闭嵌入面板
+function closeEmbed() {
+  if (fillTimer) {
+    window.clearTimeout(fillTimer)
+    fillTimer = 0
+  }
+  active.value = null
+  panelScale.value = 0
+  isEmbedPanel.value = false
+  embedUrl.value = ''
+}
+
+// 能源楼系统登录页加载完成：同域注入，自动填充账号密码。
+// 状态轮询：登录页输入框渲染较慢；若 localStorage 残留 token，守卫会把入口路径
+// 当成不存在的路由而渲染 404，此时清除残留 token 并重新加载
+let fillTimer = 0
+function onEmbedLoad() {
+  if (active.value?.id !== 'system') return
+  const iframe = iframeEl.value
+  let doc
+  try {
+    doc = iframe?.contentDocument
+  } catch {
     return
   }
-  active.value = node
-  isEmbedPanel.value = false
-  panelScale.value = 0
-  setTimeout(() => { panelScale.value = 1 }, 50)
+  if (!doc) return
+  if (fillTimer) {
+    window.clearTimeout(fillTimer)
+    fillTimer = 0
+  }
+
+  // 通过原生 setter 赋值并派发 input 事件，Vue(v-model) 才能捕获到新值
+  const setValue = (input, value) => {
+    const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')
+    desc.set.call(input, value)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    input.dispatchEvent(new Event('change', { bubbles: true }))
+  }
+
+  let tries = 0
+  const step = () => {
+    tries += 1
+    let path = ''
+    try {
+      path = iframe.contentWindow?.location?.pathname || ''
+    } catch {
+      return
+    }
+    // 登录成功后 iframe 内部跳转到 /main，停止填充轮询
+    if (!path.endsWith('/login')) return
+
+    // 残留/过期 token 导致守卫渲染了 404：清掉 token，重新加载入口
+    if (doc.querySelector('.wscn-http404-container')) {
+      try {
+        window.localStorage.removeItem('Admin-Token')
+      } catch {
+        return
+      }
+      iframe.src = SYSTEM_LOGIN_PATH
+      return
+    }
+
+    const userInput = doc.querySelector('input[placeholder="请输入用户名"]')
+    const passInput = doc.querySelector('input[placeholder="请输入密码"]')
+    if (userInput && passInput) {
+      setValue(userInput, SYSTEM_ACCOUNT.username)
+      setValue(passInput, SYSTEM_ACCOUNT.password)
+      userInput.dispatchEvent(new Event('blur', { bubbles: true }))
+      passInput.dispatchEvent(new Event('blur', { bubbles: true }))
+      return
+    }
+    // 等待 SPA 渲染（最多约 10s）
+    if (tries < 40) fillTimer = window.setTimeout(step, 250)
+  }
+  step()
 }
 
 const labelEls = []
@@ -841,6 +937,10 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   if (rafId) cancelAnimationFrame(rafId)
   rafId = 0
+  if (fillTimer) {
+    window.clearTimeout(fillTimer)
+    fillTimer = 0
+  }
   if (resumeTimer) {
     window.clearTimeout(resumeTimer)
     resumeTimer = 0
@@ -894,21 +994,23 @@ onBeforeUnmount(() => {
       @close="active = null; panelScale = 0; isEmbedPanel = false"
     />
 
-    <!-- 能源楼仿真系统：iframe 嵌入弹窗 -->
+    <!-- iframe 嵌入弹窗：能源楼仿真系统(device) / 能源楼系统(system) -->
     <div
-      v-if="active && active.id === 'device'"
+      v-if="active && isEmbedPanel"
       class="embed-panel"
       :style="{ transform: `scale(${panelScale})` }"
     >
       <div class="embed-panel-header">
-        <span class="embed-panel-title">能源楼仿真系统</span>
-        <button class="embed-panel-close" @click="active = null; panelScale = 0; isEmbedPanel = false">×</button>
+        <span class="embed-panel-title">{{ active.title }}</span>
+        <button class="embed-panel-close" @click="closeEmbed">×</button>
       </div>
       <iframe
-        :src="EMBED_URL"
+        ref="iframeEl"
+        :src="embedUrl"
         class="embed-panel-frame"
         sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
         loading="lazy"
+        @load="onEmbedLoad"
       />
     </div>
 
@@ -1025,20 +1127,20 @@ onBeforeUnmount(() => {
   display: flex; align-items: center; gap: 6px;
   padding: 9px 16px;
   font-family: var(--font); font-size: 12.5px; font-weight: 600;
-  letter-spacing: .05em; color: #1A2A3A; cursor: pointer;
-  background: rgba(255,255,255,.85);
-  border: 1px solid rgba(100,150,200,.4);
+  letter-spacing: .05em; color: #00e5ff; cursor: pointer;
+  background: rgba(10,20,35,0.9);
+  border: 1.5px solid rgba(0,212,255,0.5);
   border-radius: 9px;
   backdrop-filter: blur(6px);
-  box-shadow: 0 4px 12px rgba(0,0,0,.15);
+  box-shadow: 0 4px 15px rgba(0,212,255,0.2);
   pointer-events: auto;
-  transition: border-color .18s, transform .18s;
+  transition: border-color .18s, transform .18s, box-shadow .18s;
 }
-.b3d-back:hover { border-color: #46A8D6; transform: translateY(-1px); }
+.b3d-back:hover { border-color: #00e5ff; transform: translateY(-1px); box-shadow: 0 4px 20px rgba(0,212,255,0.4); }
 .b3d-hint {
   font-size: 11.5px;
   letter-spacing: .08em;
-  color: rgba(40,60,80,.7);
+  color: rgba(0,212,255,0.6);
 }
 
 .b3d-fallback {

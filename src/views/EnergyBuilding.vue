@@ -73,9 +73,9 @@ function backToMap() {
   justify-content: space-between;
   gap: 18px;
   padding: 0 22px;
-  background: linear-gradient(180deg, rgba(255,250,242,.96), rgba(240,231,215,.92));
-  border-bottom: 1px solid var(--line);
-  box-shadow: 0 2px 12px rgba(139,115,85,.12);
+  background: linear-gradient(180deg, rgba(10,20,35,.98), rgba(6,15,25,.95));
+  border-bottom: 1px solid rgba(0,212,255,0.3);
+  box-shadow: 0 2px 20px rgba(0,212,255,0.15);
   backdrop-filter: blur(6px);
   z-index: 1000;
 }
@@ -90,13 +90,14 @@ function backToMap() {
   font-size: 15px;
   font-weight: 600;
   letter-spacing: .06em;
-  color: var(--txt);
+  color: #00e5ff;
   white-space: nowrap;
+  text-shadow: 0 0 10px rgba(0,229,255,0.5);
 }
 .eb-sub {
   font-size: 11px;
   letter-spacing: .08em;
-  color: var(--txt-dim);
+  color: rgba(0,212,255,0.7);
   white-space: nowrap;
 }
 
@@ -110,28 +111,32 @@ function backToMap() {
   border: 1px solid transparent;
 }
 .eb-badge.is-map {
-  color: #1F6E8C;
-  background: rgba(46,134,171,.12);
-  border-color: rgba(46,134,171,.4);
+  color: #00e5ff;
+  background: rgba(0,212,255,0.1);
+  border-color: rgba(0,212,255,0.5);
+  box-shadow: 0 0 10px rgba(0,212,255,0.3);
 }
 .eb-badge.is-3d {
-  color: #EAF6FF;
-  background: linear-gradient(135deg, #1B3E5E, #102637);
-  border-color: rgba(143,216,247,.4);
+  color: #00e5ff;
+  background: linear-gradient(135deg, #0A1A2E, #061220);
+  border-color: rgba(0,212,255,0.6);
+  box-shadow: 0 0 15px rgba(0,212,255,0.4);
 }
 .eb-zoom {
   display: flex; align-items: baseline; gap: 6px;
   padding: 4px 12px;
   border-radius: 999px;
-  background: rgba(255,255,255,.6);
-  border: 1px solid var(--line);
+  background: rgba(10,20,35,0.8);
+  border: 1px solid rgba(0,212,255,0.4);
+  box-shadow: 0 0 10px rgba(0,212,255,0.2);
 }
-.eb-zoom-label { font-size: 10.5px; letter-spacing: .1em; color: var(--txt-dim); }
+.eb-zoom-label { font-size: 10.5px; letter-spacing: .1em; color: rgba(0,212,255,0.7); }
 .eb-zoom-value {
   font-family: var(--font-num);
   font-size: 14px;
   font-weight: 700;
-  color: var(--accent);
+  color: #00e5ff;
+  text-shadow: 0 0 8px rgba(0,229,255,0.5);
   letter-spacing: .04em;
 }
 

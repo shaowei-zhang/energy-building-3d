@@ -11,11 +11,9 @@ const emit = defineEmits(['enter3d', 'zoom'])
 const Z3D = 18
 // 初始缩放级别（同时是初始视野的上限，用于完整展示三个校区）
 const INITIAL_ZOOM = 11
-// 高德栅格瓦片（注意 scale 必须为 1，scale=2 服务端返回 404 会被浏览器 ORB 拦截）
+// 主底图：高德中文栅格（国内访问稳定、无需 key）。
+// 瓦片本身是浅色，通过 CSS filter 反转为深色（见 .leaflet-tile-pane），与青色 HUD 适配
 const GAODE_URL = 'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}'
-const OSM_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
-// 瓦片累计错误阈值，超过后自动切换备用底图
-const TILE_ERROR_LIMIT = 10
 // 弹窗、标记与视口边界之间需要保留的安全间距
 const EDGE_GAP = 12
 // 弹窗被压缩时的最小内容高度（低于此值不再压缩，改为视口裁切）
@@ -26,8 +24,6 @@ const transitioning = ref(false)
 const showEnterBtn = ref(false)
 
 let map = null
-let tileErrors = 0
-let fellBack = false
 // 本次到达 z18 是否由点击点位触发（点击下钻不自动进 3D）
 let clickDrill = false
 let enterTimer = 0
@@ -84,26 +80,16 @@ onMounted(() => {
 
   L.control.zoom({ position: 'topleft' }).addTo(map)
 
-  const gaode = L.tileLayer(GAODE_URL, {
+  // 弹窗展开/关闭时切换 class，控制网格 HUD 的淡出/恢复
+  map.on('popupopen', () => map.getContainer().classList.add('has-popup'))
+  map.on('popupclose', () => map.getContainer().classList.remove('has-popup'))
+
+  // 主底图：高德栅格（深色由 .leaflet-tile-pane 的 CSS filter 完成）
+  L.tileLayer(GAODE_URL, {
     subdomains: ['1', '2', '3', '4'],
     maxZoom: Z3D,
     attribution: '© <a href="https://ditu.amap.com/" target="_blank">高德地图</a>'
-  })
-  const osm = L.tileLayer(OSM_URL, {
-    maxZoom: Z3D,
-    attribution: '© <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>'
-  })
-
-  // 底图异常自动降级
-  gaode.on('tileerror', () => {
-    tileErrors += 1
-    if (!fellBack && tileErrors > TILE_ERROR_LIMIT) {
-      fellBack = true
-      map.removeLayer(gaode)
-      osm.addTo(map)
-    }
-  })
-  gaode.addTo(map)
+  }).addTo(map)
 
   // 三校区点位
   const campusMarkers = []
@@ -253,7 +239,20 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="campus-map">
-    <div ref="mapEl" class="campus-map-canvas"></div>
+    <div ref="mapEl" class="campus-map-canvas">
+      <!-- 高科技网格 HUD 覆盖层：必须位于 Leaflet 容器内部（与 map-pane 同级），
+           否则会被 Leaflet 合成层整体压在下方；青色系与图标、3D 模型发光色一致 -->
+      <div class="map-hud" aria-hidden="true">
+        <div class="hud-grid"></div>
+        <div class="hud-scan"></div>
+        <div class="hud-ruler hud-ruler-x"></div>
+        <div class="hud-ruler hud-ruler-y"></div>
+        <span class="hud-corner is-tl"></span>
+        <span class="hud-corner is-tr"></span>
+        <span class="hud-corner is-bl"></span>
+        <span class="hud-corner is-br"></span>
+      </div>
+    </div>
 
     <!-- 缩放到位后的过渡遮罩 -->
     <div v-if="transitioning" class="map-transition">
@@ -288,38 +287,145 @@ onBeforeUnmount(() => {
 /* 注意：这里不能给 .leaflet-container 设 position，
    否则会以同优先级覆盖 .campus-map-canvas 的 absolute 定位，使容器高度塌陷为 0 */
 .leaflet-container {
-  background: var(--bg);
+  background: #060D15;
   font-family: var(--font);
   outline: none;
 }
+/* 浅色高德瓦片反转为深色底图：
+   invert 明暗反转 → hue-rotate 180 让水系/道路的原有色相回归；
+   再降饱和、压亮度，使冷灰底图衬托青色网格与发光图标 */
+.leaflet-tile-pane {
+  filter: invert(1) hue-rotate(180deg) saturate(0.55) brightness(0.9) contrast(0.92);
+}
+/* 科技感覆盖层：暗角 + 扫描线 + 微光（z450 才能盖在 map-pane z400 之上） */
 .leaflet-container::after {
   content: "";
   position: absolute;
   inset: 0;
-  z-index: 350;
+  z-index: 450;
   pointer-events: none;
-  background: radial-gradient(130% 90% at 50% 0%, rgba(255,245,225,.15), transparent 55%),
-              linear-gradient(180deg, rgba(237,228,211,.06), rgba(212,197,169,.04));
+  background:
+    radial-gradient(ellipse 80% 60% at 50% 50%, transparent 40%, rgba(0,0,0,0.5) 100%),
+    repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,212,255,0.015) 2px, rgba(0,212,255,0.015) 4px);
+  border: 1px solid rgba(0,212,255,0.2);
+  border-radius: 2px;
+  box-shadow: inset 0 0 60px rgba(0,212,255,0.05);
 }
-.leaflet-control-zoom { border: none !important; box-shadow: 0 4px 14px rgba(139,115,85,.18) !important; }
+/* 科技网格 HUD 覆盖层：位于 Leaflet map-pane(z400) 之上、控件(z1000) 之下，不拦截交互。
+   注意 z 必须 >400，否则整个 HUD 会被 Leaflet 合成层压在下方而完全不可见 */
+.map-hud {
+  position: absolute;
+  inset: 0;
+  z-index: 450;
+  pointer-events: none;
+  overflow: hidden;
+  transition: opacity 0.3s ease;
+}
+/* 弹窗展开时淡出网格，保证弹窗内容最干净、最聚焦 */
+.leaflet-container.has-popup .map-hud { opacity: 0; }
+/* 双层科技网格：主网格 + 微网格，中心亮、四周径向淡出；
+   统一使用 3D 模型/图标同款青色 #00D4FF */
+.hud-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(0,212,255,0.11) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,212,255,0.11) 1px, transparent 1px),
+    linear-gradient(rgba(0,212,255,0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,212,255,0.04) 1px, transparent 1px);
+  background-size: 88px 88px, 88px 88px, 17.6px 17.6px, 17.6px 17.6px;
+  -webkit-mask-image: radial-gradient(ellipse 76% 66% at 50% 45%, #000 0%, rgba(0,0,0,0.55) 52%, transparent 82%);
+  mask-image: radial-gradient(ellipse 76% 66% at 50% 45%, #000 0%, rgba(0,0,0,0.55) 52%, transparent 82%);
+}
+/* 雷达扫描光带：自上而下周期扫过，扫过处网格被"激活"提亮 */
+.hud-scan {
+  position: absolute;
+  left: -10%;
+  right: -10%;
+  top: 0;
+  height: 28%;
+  background: linear-gradient(180deg,
+    transparent 0%,
+    rgba(0,212,255,0.02) 55%,
+    rgba(0,212,255,0.07) 88%,
+    rgba(0,229,255,0.18) 100%);
+  border-bottom: 1px solid rgba(0,229,255,0.5);
+  box-shadow: 0 0 60px 8px rgba(0,212,255,0.12);
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
+  transform: translateY(-110%);
+  animation: hudScan 9.5s cubic-bezier(0.45,0,0.55,1) infinite;
+}
+@keyframes hudScan {
+  0%, 12% { transform: translateY(-110%); }
+  88%, 100% { transform: translateY(460%); }
+}
+/* 边缘刻度：顶部 + 右侧，两端淡出避开四角标 */
+.hud-ruler { position: absolute; }
+.hud-ruler-x {
+  top: 0; left: 0; right: 0; height: 22px;
+  background:
+    repeating-linear-gradient(90deg, rgba(0,212,255,0.30) 0 1px, transparent 1px 56px),
+    repeating-linear-gradient(90deg, rgba(0,212,255,0.14) 0 1px, transparent 1px 14px);
+  -webkit-mask-image: linear-gradient(90deg, transparent 56px, #000 96px, #000 calc(100% - 96px), transparent calc(100% - 56px));
+  mask-image: linear-gradient(90deg, transparent 56px, #000 96px, #000 calc(100% - 96px), transparent calc(100% - 56px));
+}
+.hud-ruler-y {
+  top: 0; bottom: 0; right: 0; width: 22px;
+  background:
+    repeating-linear-gradient(0deg, rgba(0,212,255,0.30) 0 1px, transparent 1px 56px),
+    repeating-linear-gradient(0deg, rgba(0,212,255,0.14) 0 1px, transparent 1px 14px);
+  -webkit-mask-image: linear-gradient(0deg, transparent 56px, #000 96px, #000 calc(100% - 96px), transparent calc(100% - 56px));
+  mask-image: linear-gradient(0deg, transparent 56px, #000 96px, #000 calc(100% - 96px), transparent calc(100% - 56px));
+}
+/* HUD 四角括弧 */
+.hud-corner {
+  position: absolute;
+  width: 28px;
+  height: 28px;
+  border: 0 solid rgba(0,229,255,0.6);
+  filter: drop-shadow(0 0 6px rgba(0,212,255,0.45));
+}
+.hud-corner.is-tl { top: 10px; left: 10px; border-top-width: 2px; border-left-width: 2px; }
+.hud-corner.is-tr { top: 10px; right: 10px; border-top-width: 2px; border-right-width: 2px; }
+.hud-corner.is-bl { bottom: 10px; left: 10px; border-bottom-width: 2px; border-left-width: 2px; }
+.hud-corner.is-br { bottom: 10px; right: 10px; border-bottom-width: 2px; border-right-width: 2px; }
+.leaflet-control-zoom {
+  margin: 52px 0 0 12px !important;
+  border: 1px solid rgba(0,212,255,0.3) !important;
+  box-shadow: 0 0 20px rgba(0,212,255,0.2), inset 0 0 10px rgba(0,20,40,0.5) !important;
+  border-radius: 6px !important;
+  overflow: hidden;
+  background: rgba(10,20,35,0.9) !important;
+}
 .leaflet-control-zoom a {
   width: 34px !important; height: 34px !important; line-height: 34px !important;
-  background: rgba(255,250,242,.92) !important;
-  color: var(--accent) !important;
-  border: 1px solid var(--line) !important;
-  backdrop-filter: blur(4px);
+  background: transparent !important;
+  color: #00d4ff !important;
+  border: none !important;
+  border-bottom: 1px solid rgba(0,212,255,0.15) !important;
+  backdrop-filter: blur(8px);
   font-size: 18px !important;
+  text-shadow: 0 0 8px rgba(0,212,255,0.6);
 }
-.leaflet-control-zoom a:hover { background: #fff !important; color: var(--txt) !important; }
+.leaflet-control-zoom a:hover {
+  background: rgba(0,212,255,0.15) !important;
+  color: #fff !important;
+  text-shadow: 0 0 12px rgba(0,212,255,1);
+}
+.leaflet-control-zoom a:last-child { border-bottom: none !important; }
 .leaflet-control-attribution {
-  background: rgba(255,250,242,.8) !important;
-  color: var(--txt-dim) !important;
+  background: rgba(10,20,35,0.85) !important;
+  color: rgba(0,212,255,0.5) !important;
   font-size: 10px;
-  backdrop-filter: blur(4px);
+  backdrop-filter: blur(8px);
   padding: 2px 8px;
-  border-radius: 6px 0 0;
+  margin-right: 48px !important;
+  margin-bottom: 16px !important;
+  border-radius: 4px;
+  border: 1px solid rgba(0,212,255,0.15);
 }
-.leaflet-control-attribution a { color: var(--accent) !important; }
+.leaflet-control-attribution a { color: rgba(0,212,255,0.7) !important; }
 
 /* ---------- 校区标记 ---------- */
 .sr-only {
@@ -336,43 +442,64 @@ onBeforeUnmount(() => {
 .campus-emblem {
   width: 42px; height: 42px; border-radius: 50%;
   margin-bottom: 3px;
-  filter: drop-shadow(0 6px 9px rgba(11,32,56,.42)) drop-shadow(0 0 13px rgba(46,134,171,.6));
+  border: 2px solid rgba(0,212,255,0.8);
+  box-shadow: 0 0 20px rgba(0,212,255,0.6), 0 0 40px rgba(0,150,255,0.4), inset 0 0 10px rgba(0,212,255,0.2);
   transition: transform .2s, filter .2s;
+  animation: emblemPulse 2s ease-in-out infinite;
+}
+@keyframes emblemPulse {
+  0%, 100% { box-shadow: 0 0 20px rgba(0,212,255,0.6), 0 0 40px rgba(0,150,255,0.4), inset 0 0 10px rgba(0,212,255,0.2); }
+  50% { box-shadow: 0 0 30px rgba(0,212,255,0.9), 0 0 60px rgba(0,150,255,0.6), inset 0 0 15px rgba(0,212,255,0.3); }
 }
 .campus-emblem img { display: block; width: 100%; height: 100%; }
 .campus-marker:hover .campus-emblem,
 .campus-marker:focus-visible .campus-emblem {
-  transform: scale(1.09);
-  filter: drop-shadow(0 8px 13px rgba(11,32,56,.5)) drop-shadow(0 0 22px rgba(46,134,171,.9));
+  transform: scale(1.1);
+  border-color: #00e5ff;
+  box-shadow: 0 0 30px rgba(0,229,255,0.8), 0 0 60px rgba(0,150,255,0.5);
 }
 .campus-pin {
   width: 0; height: 0;
   border-left: 7px solid transparent; border-right: 7px solid transparent;
-  border-top: 8px solid #2E86AB; margin-top: -1px;
+  border-top: 8px solid #00e5ff; margin-top: -1px;
+  filter: drop-shadow(0 0 6px rgba(0,229,255,0.8));
 }
 .campus-dot {
   position: relative; width: 18px; height: 18px; border-radius: 50%;
-  background: #2E86AB; border: 2.5px solid #fff;
-  box-shadow: 0 0 12px rgba(46,134,171,.8), 0 0 24px rgba(46,134,171,.5);
+  background: radial-gradient(circle, #00e5ff 0%, #0088aa 100%);
+  border: 2.5px solid rgba(0,229,255,0.9);
+  box-shadow: 0 0 15px rgba(0,229,255,0.9), 0 0 30px rgba(0,150,255,0.5), 0 0 50px rgba(0,212,255,0.3);
   margin-top: -2px;
+}
+.campus-dot::before {
+  content: ""; position: absolute; inset: -12px; border-radius: 50%;
+  border: 1.5px solid rgba(0,229,255,0.3);
+  animation: dotRing 3s linear infinite;
 }
 .campus-dot::after {
   content: ""; position: absolute; inset: -6px; border-radius: 50%;
-  border: 2px solid rgba(46,134,171,.6);
+  border: 2px solid rgba(0,229,255,0.5);
   animation: dotPulse 2.6s ease-out infinite;
 }
 @keyframes dotPulse {
   0% { transform: scale(.5); opacity: 1; }
-  100% { transform: scale(2); opacity: 0; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+@keyframes dotRing {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
 }
 
-/* ---------- 暗色弹窗 ---------- */
+/* ---------- 科技感弹窗 ---------- */
 .campus-popup .leaflet-popup-content-wrapper {
-  background: linear-gradient(160deg, #16293F, #0B1826);
+  background: linear-gradient(160deg, #0A1A2E 0%, #061220 100%);
   color: #E8F1F8;
-  border: 1px solid rgba(46,134,171,.5);
-  border-radius: 14px;
-  box-shadow: 0 18px 44px rgba(6,16,28,.5), 0 0 0 1px rgba(143,216,247,.08);
+  border: 1.5px solid rgba(0,212,255,0.6);
+  border-radius: 8px;
+  box-shadow:
+    0 0 40px rgba(0,212,255,0.4),
+    0 0 80px rgba(0,100,200,0.2),
+    inset 0 0 30px rgba(0,30,60,0.6);
   /* 弹窗根元素承担 Leaflet 的定位 transform，动画放在内层包裹层 */
   animation: popIn .4s cubic-bezier(.22,1.5,.42,1) both;
   transform-origin: 50% 100%;
@@ -384,9 +511,9 @@ onBeforeUnmount(() => {
   line-height: 1.6;
 }
 .campus-popup .leaflet-popup-tip {
-  background: #0B1826;
-  border: 1px solid rgba(46,134,171,.5);
-  box-shadow: none;
+  background: #061220;
+  border: 1.5px solid rgba(0,212,255,0.6);
+  box-shadow: 0 0 20px rgba(0,212,255,0.3);
 }
 /* 视口高度不足时弹窗被压缩，内容内部滚动 */
 .campus-popup .leaflet-popup-scrolled {
@@ -412,46 +539,59 @@ onBeforeUnmount(() => {
 }
 .popup-logo img {
   width: 58px; height: 58px;
-  filter: drop-shadow(0 8px 14px rgba(3,10,20,.55)) drop-shadow(0 0 16px rgba(46,134,171,.55));
+  filter: drop-shadow(0 0 20px rgba(0,212,255,0.8)) drop-shadow(0 0 40px rgba(0,150,255,0.4));
+  animation: logoGlow 2.5s ease-in-out infinite alternate;
+}
+@keyframes logoGlow {
+  from { filter: drop-shadow(0 0 15px rgba(0,212,255,0.6)) drop-shadow(0 0 30px rgba(0,150,255,0.3)); }
+  to   { filter: drop-shadow(0 0 25px rgba(0,212,255,1)) drop-shadow(0 0 50px rgba(0,150,255,0.6)); }
 }
 .popup-name,
 .popup-region,
 .popup-line,
 .popup-enter-3d { animation: fadeUp .42s ease-out both; }
 .popup-name {
-  font-size: 13.5px; font-weight: 600; color: #F2F9FF;
-  letter-spacing: .02em; text-align: center;
+  font-size: 13.5px; font-weight: 600; color: #00e5ff;
+  letter-spacing: .08em; text-align: center;
+  text-shadow: 0 0 10px rgba(0,229,255,0.5);
   animation-delay: .12s;
 }
 .popup-region {
-  text-align: center; color: #8FD8F7; font-size: 11.5px;
-  letter-spacing: .1em; margin: 2px 0 10px;
+  text-align: center; color: #00b8d4; font-size: 11.5px;
+  letter-spacing: .15em; margin: 2px 0 10px;
   animation-delay: .18s;
 }
 .popup-line {
   display: flex; gap: 8px; align-items: flex-start;
   padding: 3px 0;
-  border-top: 1px solid rgba(143,216,247,.14);
+  border-top: 1px solid rgba(0,212,255,0.3);
 }
 .popup-region ~ .popup-line { animation-delay: .24s; }
 .popup-region ~ .popup-line + .popup-line { animation-delay: .3s; }
 .popup-region ~ .popup-line + .popup-line + .popup-line { animation-delay: .36s; }
-.popup-label { flex: none; width: 72px; color: #7FA6C0; }
-.popup-text { color: #D6E6F2; }
+.popup-label { flex: none; width: 72px; color: rgba(0,212,255,0.7); }
+.popup-text { color: #C8E6F0; }
 .popup-enter-3d {
   display: flex; align-items: center; justify-content: center; gap: 7px;
   width: 100%; margin-top: 12px; padding: 9px 12px;
   font-family: var(--font); font-size: 12.5px; font-weight: 600;
-  letter-spacing: .06em; color: #06202E; cursor: pointer;
-  background: linear-gradient(135deg, #8FD8F7, #46A8D6);
-  border: none; border-radius: 9px;
-  box-shadow: 0 6px 16px rgba(46,134,171,.42);
-  animation-delay: .42s;
+  letter-spacing: .08em; color: #001a2e; cursor: pointer;
+  background: linear-gradient(135deg, #00e5ff 0%, #0099cc 100%);
+  border: 1.5px solid rgba(0,229,255,0.8); border-radius: 6px;
+  box-shadow:
+    0 0 25px rgba(0,229,255,0.6),
+    0 6px 20px rgba(0,150,255,0.4),
+    inset 0 1px 0 rgba(255,255,255,0.25);
+  animation: fadeUp .42s ease-out .42s both, btnPulse 2s ease-in-out infinite;
   transition: transform .18s, box-shadow .18s;
 }
+@keyframes btnPulse {
+  0%, 100% { box-shadow: 0 0 25px rgba(0,229,255,0.6), 0 6px 20px rgba(0,150,255,0.4); }
+  50% { box-shadow: 0 0 45px rgba(0,229,255,0.9), 0 6px 30px rgba(0,150,255,0.6); }
+}
 .popup-enter-3d:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 9px 22px rgba(46,134,171,.6);
+  transform: translateY(-2px);
+  box-shadow: 0 0 50px rgba(0,229,255,1), 0 10px 30px rgba(0,150,255,0.6);
 }
 @keyframes popIn {
   from { opacity: 0; transform: translateY(10px) scale(.88); }
@@ -471,18 +611,21 @@ onBeforeUnmount(() => {
   position: absolute; inset: 0; z-index: 900;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 16px;
-  background: rgba(11,24,38,.74);
-  backdrop-filter: blur(3px);
+  background: rgba(5,12,20,0.88);
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(0,212,255,0.3);
   animation: fadeUp .22s ease-out both;
 }
 .map-spinner {
   width: 42px; height: 42px; border-radius: 50%;
-  border: 3px solid rgba(143,216,247,.24);
-  border-top-color: #8FD8F7;
+  border: 3px solid rgba(0,212,255,0.2);
+  border-top-color: #00e5ff;
+  box-shadow: 0 0 20px rgba(0,229,255,0.6), 0 0 40px rgba(0,150,255,0.3);
   animation: spin .82s linear infinite;
 }
 .map-transition-text {
-  color: #D6E6F2; font-size: 13px; letter-spacing: .1em;
+  color: #00e5ff; font-size: 13px; letter-spacing: .15em;
+  text-shadow: 0 0 10px rgba(0,229,255,0.6);
 }
 @keyframes spin {
   to { transform: rotate(360deg); }
@@ -493,17 +636,22 @@ onBeforeUnmount(() => {
   display: flex; align-items: center; gap: 8px;
   padding: 12px 20px;
   font-family: var(--font); font-size: 13px; font-weight: 600;
-  letter-spacing: .06em; color: #EAF6FF; cursor: pointer;
-  background: linear-gradient(140deg, #1B3350, #0F2233);
-  border: 1px solid rgba(46,134,171,.6); border-radius: 11px;
-  box-shadow: 0 10px 26px rgba(11,32,56,.4), 0 0 20px rgba(46,134,171,.28);
-  animation: fadeUp .34s ease-out both;
-  transition: transform .18s, box-shadow .18s, border-color .18s;
+  letter-spacing: .08em; color: #001a2e; cursor: pointer;
+  background: linear-gradient(135deg, #00e5ff 0%, #0088aa 100%);
+  border: 1.5px solid rgba(0,229,255,0.8); border-radius: 6px;
+  box-shadow:
+    0 0 30px rgba(0,229,255,0.6),
+    0 8px 25px rgba(0,100,200,0.4),
+    inset 0 1px 0 rgba(255,255,255,0.25);
+  animation: fadeUp .34s ease-out both, btnPulse 2.5s ease-in-out infinite;
+  transition: transform .18s, box-shadow .18s;
 }
 .enter-3d-btn:hover {
-  transform: translateY(-2px);
-  border-color: #5BB3E0;
-  box-shadow: 0 14px 32px rgba(11,32,56,.5), 0 0 30px rgba(46,134,171,.5);
+  transform: translateY(-2px) scale(1.03);
+  box-shadow:
+    0 0 45px rgba(0,229,255,0.9),
+    0 12px 35px rgba(0,100,200,0.5),
+    inset 0 1px 0 rgba(255,255,255,0.3);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -515,6 +663,7 @@ onBeforeUnmount(() => {
   .popup-enter-3d,
   .map-transition,
   .enter-3d-btn { animation: none !important; }
+  .hud-scan { animation: none !important; }
   .campus-dot::after { animation: none !important; opacity: 0; }
   .map-spinner { animation-duration: 2s; }
 }
