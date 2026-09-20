@@ -9,9 +9,15 @@ const hostEl = ref(null)
 const failed = ref(false)
 const active = ref(null)
 const panelPos = ref({ x: 0, y: 0 })
-const panelVisible = ref(false)
 const visible = ref(BUILDING_NODES.map(() => true))
 const panelScale = ref(0)
+
+// 统一打开弹窗的方法
+function openPanel(node) {
+  active.value = node
+  panelScale.value = 0
+  setTimeout(() => { panelScale.value = 1 }, 50)
+}
 
 const labelEls = []
 function setLabelEl(el, i) {
@@ -712,10 +718,7 @@ function buildScene(Controls) {
     if (!hit) return
     const node = nodes.find((n) => n.mesh === hit.object)
     if (node) {
-      active.value = node.data
-      // 触发动画
-      panelScale.value = 0
-      setTimeout(() => { panelScale.value = 1 }, 10)
+      openPanel(node.data)
     }
   })
 }
@@ -853,7 +856,7 @@ onBeforeUnmount(() => {
         :class="`is-${node.tone}`"
         :style="{ opacity: visible[i] ? 1 : 0, pointerEvents: visible[i] ? 'auto' : 'none' }"
         type="button"
-        @click="active = node"
+        @click="openPanel(node)"
       >
         <span class="b3d-label-dot" aria-hidden="true"></span>
         <span class="b3d-label-text">{{ node.title }}</span>
@@ -885,7 +888,7 @@ onBeforeUnmount(() => {
       <p class="b3d-fallback-desc">已降级为静态标注入口，点击下方按钮仍可查看各标注点信息。</p>
       <ul class="b3d-fallback-list">
         <li v-for="node in BUILDING_NODES" :key="node.id">
-          <button class="b3d-fallback-btn" :class="`is-${node.tone}`" type="button" @click="active = node">
+          <button class="b3d-fallback-btn" :class="`is-${node.tone}`" type="button" @click="openPanel(node)">
             <span class="b3d-label-dot" aria-hidden="true"></span>
             {{ node.title }}
           </button>
@@ -1048,8 +1051,11 @@ onBeforeUnmount(() => {
 /* 弹窗跟随动画 */
 .info-panel {
   position: absolute;
-  transition: left 0.1s ease-out, top 0.1s ease-out, transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  left: 0;
+  top: 0;
+  z-index: 900;
+  transition: left 0.08s linear, top 0.08s linear, transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
   transform-origin: top left;
-  will-change: transform;
+  will-change: transform, left, top;
 }
 </style>
