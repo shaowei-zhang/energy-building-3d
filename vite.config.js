@@ -11,7 +11,7 @@ export default defineConfig({
   server: {
     // ==== 关键：让局域网能访问 ====
     host: '0.0.0.0',
-    port: 5173,
+    port: 5174,
     strictPort: true,
     allowedHosts: true,   // 用 IP/域名访问时避免 Blocked request
 
