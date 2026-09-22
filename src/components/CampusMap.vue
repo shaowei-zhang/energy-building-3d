@@ -1,11 +1,11 @@
 <script setup>
-import { onMounted, onBeforeUnmount, ref } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import { CAMPUSES } from '../data/campus'
 import emblemUrl from '../assets/hhu-emblem.svg'
 
-const emit = defineEmits(['enter3d', 'zoom'])
+const emit = defineEmits(['enter3d', 'enter-plan', 'zoom'])
 
 // 最深层级：既是底图上限，也是 3D 楼宇的出现层级
 const Z3D = 18
@@ -22,6 +22,17 @@ const POPUP_MIN_HEIGHT = 96
 const mapEl = ref(null)
 const transitioning = ref(false)
 const showEnterBtn = ref(false)
+// 最近点击 / 下钻的校区：江宁校区进入平面地图，其余进入 3D 楼宇
+const activeCampusId = ref(null)
+const activeCampus = computed(() => CAMPUSES.find((c) => c.id === activeCampusId.value) || null)
+const isPlanTarget = computed(() => !!activeCampus.value?.hasPlan)
+const enterText = computed(() => (isPlanTarget.value ? '进入平面地图' : '进入 3D 楼宇'))
+const transitionText = computed(() => (isPlanTarget.value ? '正在进入江宁校区平面地图…' : '正在进入能源楼 3D 楼宇…'))
+
+function emitEnter() {
+  if (isPlanTarget.value) emit('enter-plan')
+  else emit('enter3d')
+}
 
 let map = null
 // 本次到达 z18 是否由点击点位触发（点击下钻不自动进 3D）
@@ -50,12 +61,18 @@ function popupHtml(c) {
       <div class="popup-line"><span class="popup-label">经纬度（约）</span><span class="popup-text">${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}</span></div>
       <div class="popup-line"><span class="popup-label">备注</span><span class="popup-text">${c.remark}</span></div>
       <button class="popup-enter-3d" type="button">
+        ${c.hasPlan ? `
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 6.5l6-2.5 6 2.5L21 4v13.5l-6 2.5-6-2.5L3 20z" fill="currentColor" fill-opacity=".25"/>
+          <path d="M9 4v13.5M15 6.5V20"/>
+        </svg>
+        进入平面地图` : `
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <path d="M12 2.6l7.4 4.2L12 11 4.6 6.8 12 2.6z" fill="currentColor" opacity=".9"/>
           <path d="M4.6 6.8L12 11v10.4l-7.4-4.2V6.8z" fill="currentColor" opacity=".55"/>
           <path d="M19.4 6.8L12 11v10.4l7.4-4.2V6.8z" fill="currentColor" opacity=".75"/>
         </svg>
-        进入 3D 楼宇
+        进入 3D 楼宇`}
       </button>
     </div>`
 }
@@ -116,13 +133,14 @@ onMounted(() => {
     // 弹窗里的按钮由 Leaflet 动态插入，需要手动绑定
     marker.on('popupopen', (e) => {
       const btn = e.popup.getElement()?.querySelector('.popup-enter-3d')
-      if (btn) btn.addEventListener('click', () => emit('enter3d'))
+      if (btn) btn.addEventListener('click', () => emitEnter())
       // 进页面后点击点位、下钻落位、已到位再点击，弹窗都要在视口内完整可见
       placePopup(marker)
     })
 
     marker.on('click', () => {
-      // 已在最深层级：不自动进 3D，只给出浮动入口
+      activeCampusId.value = c.id
+      // 已在最深层级：不自动进入下一层，只给出浮动入口
       if (map.getZoom() >= Z3D) {
         clickDrill = false
         showEnterBtn.value = true
@@ -204,13 +222,14 @@ onMounted(() => {
       return
     }
 
-    // 手动缩放到位：过渡遮罩停留 650ms 后自动进入 3D
+    // 手动缩放到位：过渡遮罩停留 650ms 后自动进入对应视图
+    // （江宁校区 → 平面地图，其余 → 能源楼 3D）
     transitioning.value = true
     showEnterBtn.value = false
     enterTimer = window.setTimeout(() => {
       enterTimer = 0
       transitioning.value = false
-      emit('enter3d')
+      emitEnter()
     }, 650)
   })
 
@@ -257,17 +276,25 @@ onBeforeUnmount(() => {
     <!-- 缩放到位后的过渡遮罩 -->
     <div v-if="transitioning" class="map-transition">
       <div class="map-spinner" aria-hidden="true"></div>
-      <p class="map-transition-text">正在进入能源楼 3D 楼宇…</p>
+      <p class="map-transition-text">{{ transitionText }}</p>
     </div>
 
     <!-- 点击点位下钻后出现的浮动入口 -->
-    <button v-if="showEnterBtn" class="enter-3d-btn" type="button" @click="emit('enter3d')">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-        <path d="M12 2.6l7.4 4.2L12 11 4.6 6.8 12 2.6z" fill="currentColor" opacity=".9"/>
-        <path d="M4.6 6.8L12 11v10.4l-7.4-4.2V6.8z" fill="currentColor" opacity=".55"/>
-        <path d="M19.4 6.8L12 11v10.4l7.4-4.2V6.8z" fill="currentColor" opacity=".75"/>
-      </svg>
-      进入 3D 楼宇
+    <button v-if="showEnterBtn" class="enter-3d-btn" type="button" @click="emitEnter">
+      <template v-if="isPlanTarget">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 6.5l6-2.5 6 2.5L21 4v13.5l-6 2.5-6-2.5L3 20z" fill="currentColor" fill-opacity=".25"/>
+          <path d="M9 4v13.5M15 6.5V20"/>
+        </svg>
+      </template>
+      <template v-else>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M12 2.6l7.4 4.2L12 11 4.6 6.8 12 2.6z" fill="currentColor" opacity=".9"/>
+          <path d="M4.6 6.8L12 11v10.4l-7.4-4.2V6.8z" fill="currentColor" opacity=".55"/>
+          <path d="M19.4 6.8L12 11v10.4l7.4-4.2V6.8z" fill="currentColor" opacity=".75"/>
+        </svg>
+      </template>
+      {{ enterText }}
     </button>
   </div>
 </template>

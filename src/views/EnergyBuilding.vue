@@ -1,14 +1,22 @@
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import CampusMap from '../components/CampusMap.vue'
 import Building3D from '../components/Building3D.vue'
+import CampusPlanMap from '../components/CampusPlanMap.vue'
 import emblemUrl from '../assets/hhu-emblem.svg'
 
-// 支持 URL #3d 直达 3D 态
+// 支持 URL #3d / #plan 直达对应视图
 const initialHash = window.location.hash.replace('#', '').toLowerCase()
 
-const mode = ref(initialHash === '3d' ? '3d' : 'map')
+const mode = ref(initialHash === '3d' ? '3d' : initialHash === 'plan' ? 'plan' : 'map')
 const zoom = ref(initialHash === '3d' ? 18 : 11)
+
+const modeMeta = {
+  map: { badge: '地图态', title: '能源楼 3D 总览', sub: '河海大学 · 三校区分布与能源楼运行示例' },
+  '3d': { badge: '3D 态', title: '能源楼 3D 总览', sub: '河海大学 · 能源楼 3D 楼宇运行示例' },
+  plan: { badge: '平面态', title: '江宁校区 · 平面功率监测', sub: '河海大学江宁校区 · 10kV 高压功率示例数据' }
+}
+const meta = computed(() => modeMeta[mode.value])
 
 function syncHash(value) {
   const next = `${window.location.pathname}${window.location.search}${value}`
@@ -18,6 +26,11 @@ function syncHash(value) {
 function enter3d() {
   mode.value = '3d'
   syncHash('#3d')
+}
+
+function enterPlan() {
+  mode.value = 'plan'
+  syncHash('#plan')
 }
 
 function backToMap() {
@@ -32,16 +45,14 @@ function backToMap() {
       <div class="eb-brand">
         <img class="eb-logo" :src="emblemUrl" alt="河海大学校徽" />
         <div class="eb-brand-text">
-          <h1 class="eb-title">能源楼 3D 总览</h1>
-          <p class="eb-sub">河海大学 · 三校区分布与能源楼运行示例</p>
+          <h1 class="eb-title">{{ meta.title }}</h1>
+          <p class="eb-sub">{{ meta.sub }}</p>
         </div>
       </div>
 
       <div class="eb-status">
-        <span class="eb-badge" :class="mode === 'map' ? 'is-map' : 'is-3d'">
-          {{ mode === 'map' ? '地图态' : '3D 态' }}
-        </span>
-        <span class="eb-zoom">
+        <span class="eb-badge" :class="`is-${mode}`">{{ meta.badge }}</span>
+        <span v-if="mode !== 'plan'" class="eb-zoom">
           <span class="eb-zoom-label">缩放级别</span>
           <b class="eb-zoom-value">z{{ zoom }}</b>
         </span>
@@ -49,7 +60,8 @@ function backToMap() {
     </header>
 
     <main class="eb-stage">
-      <CampusMap v-if="mode === 'map'" @enter3d="enter3d" @zoom="zoom = $event" />
+      <CampusMap v-if="mode === 'map'" @enter3d="enter3d" @enter-plan="enterPlan" @zoom="zoom = $event" />
+      <CampusPlanMap v-else-if="mode === 'plan'" @back="backToMap" />
       <Building3D v-else @back="backToMap" />
     </main>
   </div>
@@ -116,7 +128,8 @@ function backToMap() {
   border-color: rgba(0,212,255,0.5);
   box-shadow: 0 0 10px rgba(0,212,255,0.3);
 }
-.eb-badge.is-3d {
+.eb-badge.is-3d,
+.eb-badge.is-plan {
   color: #00e5ff;
   background: linear-gradient(135deg, #0A1A2E, #061220);
   border-color: rgba(0,212,255,0.6);
