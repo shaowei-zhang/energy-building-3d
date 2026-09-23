@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import {
   JIANGNING_BUILDINGS,
   buildingPowerSummary,
@@ -7,6 +7,11 @@ import {
   HV_INFO,
   DATA_NOTE
 } from '../data/campus'
+import {
+  resolveRealRoom,
+  realPowerSummary,
+  realPowerSeries
+} from '../data/jiangningRealPower'
 import mapImg from '../assets/江宁校园地图.jpg'
 
 const emit = defineEmits(['back'])
@@ -27,7 +32,296 @@ function closeTopo() {
 
 // ---------- 选中楼宇与功率总览 ----------
 const selected = ref(null)
-const summary = computed(() => (selected.value ? buildingPowerSummary(selected.value) : null))
+// 命中真实数据（src/mock/中心站高压功率数据.json）的监测点走实测统计；未命中沿用示例生成
+const realName = computed(() => (selected.value ? resolveRealRoom(selected.value) : null))
+const isReal = computed(() => !!realName.value)
+const summary = computed(() => {
+  if (!selected.value) return null
+  return realName.value
+    ? realPowerSummary(realName.value, selected.value.capOverrides)
+    : buildingPowerSummary(selected.value)
+})
+// 实测点：站名 / 馈线来源 / 变压器容量明细 / 数据截止日
+const feederText = computed(() => {
+  if (!isReal.value) return ''
+  const fs = [...new Set(summary.value.transformers.map((t) => t.source).filter(Boolean))]
+  return fs.length ? fs.join(' / ') : ''
+})
+const capItems = computed(() => {
+  if (!isReal.value) return []
+  return summary.value.transformers.map((t) => ({
+    label: `T${t.no}`,
+    cap: t.cap != null && !isNaN(t.cap) ? t.cap : null,
+    source: t.source || ''
+  }))
+})
+// 明细文本：容量 0 显示“未装”，无数据显示“—”；存在有效容量时末尾带 kVA
+const capDetailText = computed(() => {
+  if (!capItems.value.length) return ''
+  const parts = capItems.value.map((t) => {
+    const src = t.source ? `（${t.source}）` : ''
+    let val = '—'
+    if (t.cap === 0) val = '未装'
+    else if (t.cap != null) val = t.cap
+    return `${t.label} ${val}${src}`
+  })
+  const hasCap = capItems.value.some((t) => t.cap != null && t.cap > 0)
+  return parts.join(' · ') + (hasCap ? ' kVA' : '')
+})
+const anchorStr = computed(() => {
+  const d = summary.value?.anchorDate
+  if (!d) return ''
+  return `${d.getMonth() + 1}/${d.getDate()}`
+})
+const realRangeText = computed(() => {
+  const r = summary.value?.dateRange
+  if (!r) return ''
+  return `实测数据 · ${r.min.getMonth() + 1}/${r.min.getDate()} – ${r.max.getMonth() + 1}/${r.max.getDate()} · 10kV 中心站`
+})
+
+// 原有楼宇与新建监测点在图上完全同构，统一渲染、统一支持删除
+// anchored: 新建点位以圆点中心精确锚定坐标；旧手工标定坐标沿用整体居中渲染
+const allMarkers = computed(() => [
+  ...JIANGNING_BUILDINGS
+    .filter((b) => !removedIds.value.includes(b.id))
+    .map((b) => ({ ...b, custom: false, anchored: false })),
+  ...customRooms.value.map((r) => ({ anchored: true, ...r }))
+])
+// 所有监测点统一：单击查看（长按触发后抑制 click）
+function onMarkerClick(m) {
+  onRoomClick(m)
+}
+
+// ---------- 双击新建配电房 ----------
+const ROOM_STORE_KEY = 'jn-custom-rooms-v1'
+const ROOM_PROFILES = [
+  { id: 'teach', label: '教学 / 办公' },
+  { id: 'dorm', label: '宿舍生活' },
+  { id: 'canteen', label: '食堂动力' },
+  { id: 'gym', label: '文体场馆' }
+]
+const ROOM_CAPS = [0,400, 500, 630, 800,1000,1250,1600]
+
+// 用户自建配电房 + 被删除的原有楼宇 id
+// 主存储：dev server 落盘到 src/mock/jiangning-plan.json；localStorage 作为降级与缓存
+const customRooms = ref([])
+const REMOVED_STORE_KEY = 'jn-removed-markers-v1'
+const removedIds = ref([])
+const MOCK_API = '/mock-api/jiangning'
+const useMockFile = import.meta.env.DEV
+
+function lsGet(key) {
+  try { return JSON.parse(localStorage.getItem(key)) } catch { return null }
+}
+function lsSet(key, v) {
+  try { localStorage.setItem(key, JSON.stringify(v)) } catch { /* 忽略 */ }
+}
+
+// 首次加载：优先读 mock 文件；mock 为空但本地缓存有旧数据时自动迁移
+async function loadStored() {
+  if (useMockFile) {
+    try {
+      const res = await fetch(MOCK_API)
+      if (res.ok) {
+        const data = await res.json()
+        const rooms = Array.isArray(data.rooms) ? data.rooms : []
+        const removed = Array.isArray(data.removedIds) ? data.removedIds : []
+        const lsRooms = lsGet(ROOM_STORE_KEY)
+        const lsRemoved = lsGet(REMOVED_STORE_KEY)
+        customRooms.value = rooms.length ? rooms : (Array.isArray(lsRooms) ? lsRooms : [])
+        removedIds.value = removed.length ? removed : (Array.isArray(lsRemoved) ? lsRemoved : [])
+        // mock 文件原本为空：把旧 localStorage 数据迁移落盘
+        if ((!rooms.length && customRooms.value.length) || (!removed.length && removedIds.value.length)) {
+          persistAll(true)
+        }
+        return
+      }
+    } catch { /* 接口不可用则降级 localStorage */ }
+  }
+  customRooms.value = lsGet(ROOM_STORE_KEY) || []
+  removedIds.value = lsGet(REMOVED_STORE_KEY) || []
+}
+
+let saveTimer = 0
+// 写缓存并（防抖）落盘 mock 文件；immediate=true 时立即写，用于迁移
+function persistAll(immediate = false) {
+  const payload = { rooms: customRooms.value, removedIds: removedIds.value }
+  lsSet(ROOM_STORE_KEY, payload.rooms)
+  lsSet(REMOVED_STORE_KEY, payload.removedIds)
+  if (!useMockFile) return
+  clearTimeout(saveTimer)
+  const flush = () => {
+    fetch(MOCK_API, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).catch(() => { /* 落盘失败时 localStorage 仍有缓存 */ })
+  }
+  if (immediate) flush()
+  else saveTimer = setTimeout(flush, 150)
+}
+function persistRooms() { persistAll() }
+function persistRemoved() { persistAll() }
+
+// 新建弹窗状态：draft 为双击落点（百分比坐标），form 为表单
+const draftPoint = ref(null)
+const showCreate = ref(false)
+const createForm = reactive({
+  name: '',
+  cap1: 800,
+  cap2: 800,
+  cap3: 800,
+  cap4: 800,
+  profile: 'teach',
+  station: '10kV 中心站 · 新建回路'
+})
+const createError = ref('')
+
+// 屏幕坐标 → 底图百分比坐标（逆 world 变换）
+function clientToWorldPct(clientX, clientY) {
+  const r = stageEl.value.getBoundingClientRect()
+  const sx = clientX - r.left
+  const sy = clientY - r.top
+  const s = scale.value
+  const wx = (sx - stage.w / 2 - tx.value) / s + base.w / 2
+  const wy = (sy - stage.h / 2 - ty.value) / s + base.h / 2
+  return {
+    x: Math.min(100, Math.max(0, (wx / base.w) * 100)),
+    y: Math.min(100, Math.max(0, (wy / base.h) * 100))
+  }
+}
+
+// 仅双击图片空白处才新建；双击监测点不触发
+function onStageDblClick(e) {
+  if (e.target.closest && e.target.closest('.bmap-pin')) return
+  const p = clientToWorldPct(e.clientX, e.clientY)
+  draftPoint.value = p
+  createForm.name = `配电房 ${customRooms.value.length + 1}`
+  createForm.cap1 = 800
+  createForm.cap2 = 800
+  createForm.cap3 = 800
+  createForm.cap4 = 800
+  createForm.profile = 'teach'
+  createForm.station = '10kV 中心站 · 新建回路'
+  createError.value = ''
+  showCreate.value = true
+}
+
+function confirmCreate() {
+  const name = createForm.name.trim()
+  if (!name) {
+    createError.value = '请输入配电房名称'
+    return
+  }
+  const cap1 = Number(createForm.cap1)
+  const cap2 = Number(createForm.cap2)
+  const cap3 = Number(createForm.cap3)
+  const cap4 = Number(createForm.cap4)
+  // 四台配变并列运行，总额定容量为四者之和
+  const cap = cap1 + cap2 + cap3 + cap4
+  const room = {
+    id: `room-${Date.now()}`,
+    name,
+    x: draftPoint.value.x,
+    y: draftPoint.value.y,
+    cap1,
+    cap2,
+    cap3,
+    cap4,
+    cap,
+    profile: createForm.profile,
+    station: createForm.station.trim() || '10kV 中心站',
+    // 示例平均功率按初始负载率约 45% 估算
+    base: Math.round(cap * 0.45),
+    custom: true
+  }
+  customRooms.value.push(room)
+  persistRooms()
+  cancelCreate()
+  selected.value = room
+}
+function cancelCreate() {
+  showCreate.value = false
+  draftPoint.value = null
+}
+function selectRoom(room) {
+  if (dragMoved.value) return
+  selected.value = selected.value?.id === room.id ? null : { ...room }
+  hoverIdx.value = -1
+}
+// 右侧面板垃圾桶：复用长按的删除确认弹窗（所有监测点均可删除）
+function askDeleteSelected() {
+  if (!selected.value) return
+  if (selected.value.custom) {
+    const room = customRooms.value.find((r) => r.id === selected.value.id)
+    if (room) showDelete.value = room
+  } else {
+    showDelete.value = { ...selected.value }
+  }
+}
+
+// ---------- 长按配电房图标 → 删除确认 ----------
+const LONG_PRESS_MS = 600
+const LONG_PRESS_MOVE = 10
+let lpTimer = 0
+let lpStart = null
+let lpTriggered = false
+const lpPressId = ref(null)
+const showDelete = ref(null) // 待删除确认的配电房
+
+function clearLpTimer() {
+  if (lpTimer) { clearTimeout(lpTimer); lpTimer = 0 }
+}
+function onRoomPointerDown(e, room) {
+  // 鼠标仅响应主键
+  if (e.pointerType === 'mouse' && e.button !== 0) return
+  lpTriggered = false
+  lpStart = { x: e.clientX, y: e.clientY }
+  lpPressId.value = room.id
+  clearLpTimer()
+  lpTimer = setTimeout(() => {
+    lpTimer = 0
+    lpTriggered = true
+    lpPressId.value = null
+    try { navigator.vibrate?.(30) } catch { /* 不支持震动时忽略 */ }
+    showDelete.value = room
+  }, LONG_PRESS_MS)
+}
+function onRoomPointerMove(e) {
+  if (!lpTimer || !lpStart) return
+  // 按住后移动超过阈值视为拖拽，取消长按（防滚动/平移误触）
+  if (Math.abs(e.clientX - lpStart.x) > LONG_PRESS_MOVE ||
+      Math.abs(e.clientY - lpStart.y) > LONG_PRESS_MOVE) {
+    clearLpTimer()
+    lpPressId.value = null
+  }
+}
+function onRoomPointerUp() {
+  clearLpTimer()
+  lpPressId.value = null
+}
+function onRoomClick(room) {
+  // 长按已触发删除弹窗：抑制随后的 click，避免同时打开数据面板
+  if (lpTriggered) {
+    lpTriggered = false
+    return
+  }
+  selectRoom(room)
+}
+function confirmDeleteRoom() {
+  const room = showDelete.value
+  if (!room) return
+  if (room.custom) {
+    customRooms.value = customRooms.value.filter((r) => r.id !== room.id)
+    persistRooms()
+  } else if (!removedIds.value.includes(room.id)) {
+    removedIds.value.push(room.id)
+    persistRemoved()
+  }
+  if (selected.value?.id === room.id) selected.value = null
+  showDelete.value = null
+}
+function cancelDelete() { showDelete.value = null }
 
 // ---------- 曲线范围 ----------
 const toInput = (d) => {
@@ -48,27 +342,58 @@ const RANGE_TABS = [
   { id: '30', label: '近 30 日' },
   { id: 'custom', label: '自定义' }
 ]
-function setRange(type) {
-  range.type = type
-  if (type === '7') {
-    range.start = toInput(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6))
-    range.end = todayStr
-  } else if (type === '30') {
-    range.start = toInput(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29))
-    range.end = todayStr
+// 实测点的“今天”= 数据截止日（最后有效日），近 7 / 30 日相对它回溯
+function baseDate() {
+  return isReal.value && summary.value?.anchorDate
+    ? new Date(summary.value.anchorDate)
+    : new Date()
+}
+// 自定义日期可选区间：实测点限定在真实数据覆盖范围内
+const rangeBounds = computed(() => {
+  if (isReal.value && summary.value?.dateRange) {
+    return { min: toInput(summary.value.dateRange.min), max: toInput(summary.value.dateRange.max) }
   }
+  return { min: null, max: todayStr }
+})
+function resetRange(type = '30') {
+  const base = baseDate()
+  range.type = type
+  range.end = toInput(base)
+  const back = type === '7' ? 6 : 29
+  range.start = toInput(new Date(base.getFullYear(), base.getMonth(), base.getDate() - back))
+}
+function setRange(type) {
+  if (type === 'custom') {
+    range.type = 'custom'
+    return
+  }
+  resetRange(type)
 }
 function onDateInput() {
   range.type = 'custom'
+  const { min, max } = rangeBounds.value
+  if (min && range.start < min) range.start = min
+  if (max && range.start > max) range.start = max
   if (range.start > range.end) range.end = range.start
+  if (max && range.end > max) range.end = max
+  if (min && range.end < min) range.end = min
 }
+
+// 切换监测点时按其数据基准日重置曲线范围，并退出容量编辑
+watch(selected, () => { editingCaps.value = false; resetRange('30') })
 
 const series = computed(() => {
   if (!selected.value) return []
-  if (range.type === 'today') return buildingSeries(selected.value, 'today')
+  if (range.type === 'today') {
+    return isReal.value
+      ? realPowerSeries(realName.value, 'today')
+      : buildingSeries(selected.value, 'today')
+  }
   const s = new Date(`${range.start}T00:00:00`)
   const e = new Date(`${range.end}T00:00:00`)
-  return buildingSeries(selected.value, 'day', s, e)
+  return isReal.value
+    ? realPowerSeries(realName.value, 'day', s, e)
+    : buildingSeries(selected.value, 'day', s, e)
 })
 
 const seriesMeta = computed(() => {
@@ -137,7 +462,43 @@ function selectBuilding(b) {
   selected.value = selected.value?.id === b.id ? null : b
   hoverIdx.value = -1
 }
-function closePanel() { selected.value = null }
+function closePanel() { selected.value = null; editingCaps.value = false }
+
+// ---------- 修改变压器容量（实测点）----------
+const editingCaps = ref(false)
+const capDraft = reactive({})
+// 编辑态实时汇总总容量
+const draftTotal = computed(() =>
+  Object.values(capDraft).reduce((s, v) => s + (Number(v) > 0 ? Number(v) : 0), 0)
+)
+// 下拉档位：标准档 + 真实文件里出现但不在档位中的容量
+const CAP_OPTIONS = computed(() => {
+  const set = new Set(ROOM_CAPS.filter((c) => c > 0))
+  if (isReal.value) for (const t of summary.value.transformers) if (t.cap != null && t.cap > 0) set.add(t.cap)
+  return [...set].sort((a, b) => a - b)
+})
+function openCapEdit() {
+  if (!isReal.value) return
+  Object.keys(capDraft).forEach((k) => delete capDraft[k])
+  for (const t of summary.value.transformers) capDraft[t.no] = t.cap != null ? t.cap : 0
+  editingCaps.value = true
+}
+function cancelCapEdit() { editingCaps.value = false }
+function saveCaps() {
+  if (!selected.value) return
+  const room = customRooms.value.find((r) => r.id === selected.value.id)
+  if (!room) { editingCaps.value = false; return }
+  const overrides = {}
+  for (const t of summary.value.transformers) {
+    // 0 也要显式保存：表示该位置未安装变压器
+    overrides[t.no] = Number(capDraft[t.no]) || 0
+  }
+  room.capOverrides = overrides
+  persistRooms()
+  // allMarkers 会随 customRooms 重新生成，同步 selected 引用使面板立即刷新
+  selected.value = allMarkers.value.find((m) => m.id === room.id) || null
+  editingCaps.value = false
+}
 
 // ---------- 平面图缩放 / 平移 ----------
 const stageEl = ref(null)
@@ -208,7 +569,7 @@ function resetView() { scale.value = 1; tx.value = 0; ty.value = 0 }
 
 function onPointerDown(e) {
   if (e.button !== 0) return
-  // 从楼宇光点按下时不拦截，交给 @click 处理
+  // 从监测点按下时不拦截，交给 @click / 长按处理
   if (e.target.closest && e.target.closest('.bmap-pin')) return
   dragging.value = true
   dragMoved.value = false
@@ -242,6 +603,8 @@ let ro = null
 function onKey(e) {
   if (e.key !== 'Escape') return
   if (showTopo.value) closeTopo()
+  else if (showDelete.value) cancelDelete()
+  else if (showCreate.value) cancelCreate()
   else closePanel()
 }
 
@@ -251,9 +614,17 @@ onMounted(() => {
   ro.observe(stageEl.value)
   stageEl.value.addEventListener('wheel', onWheel, { passive: false })
   window.addEventListener('keydown', onKey)
+  loadStored()
 })
 onBeforeUnmount(() => {
   ro?.disconnect()
+  clearLpTimer()
+  // 有待写入的数据时，关闭页面也尽量落盘
+  if (useMockFile && saveTimer && navigator.sendBeacon) {
+    const payload = JSON.stringify({ rooms: customRooms.value, removedIds: removedIds.value })
+    try { navigator.sendBeacon(MOCK_API, new Blob([payload], { type: 'application/json' })) } catch { /* 忽略 */ }
+  }
+  clearTimeout(saveTimer)
   stageEl.value?.removeEventListener('wheel', onWheel)
   window.removeEventListener('keydown', onKey)
 })
@@ -279,6 +650,7 @@ onBeforeUnmount(() => {
       @pointermove="onPointerMove"
       @pointerup="onPointerUp"
       @pointercancel="onPointerUp"
+      @dblclick="onStageDblClick"
     >
       <div class="world-anchor">
         <div ref="worldEl" class="plan-world" :style="worldStyle">
@@ -292,22 +664,44 @@ onBeforeUnmount(() => {
           />
           <div class="img-wash" aria-hidden="true"></div>
 
-          <!-- 楼宇高压功率监测点 -->
+          <!-- 高压功率监测点（统一样式：单击查看数据，长按删除） -->
           <button
-            v-for="b in JIANGNING_BUILDINGS"
-            :key="b.id"
+            v-for="m in allMarkers"
+            :key="m.id"
             type="button"
             class="bmap-pin"
-            :class="{ 'is-active': selected?.id === b.id, 'is-dim': selected && selected.id !== b.id }"
-            :style="{ left: b.x + '%', top: b.y + '%' }"
-            @click.stop="selectBuilding(b)"
+            :class="{
+              'is-active': selected?.id === m.id,
+              'is-dim': selected && selected.id !== m.id,
+              'is-pressing': lpPressId === m.id,
+              'is-anchored': m.anchored !== false
+            }"
+            :style="{ left: m.x + '%', top: m.y + '%' }"
+            title="单击查看功率数据，长按删除"
+            @click.stop="onMarkerClick(m)"
+            @pointerdown.stop="onRoomPointerDown($event, m)"
+            @pointermove="onRoomPointerMove($event)"
+            @pointerup="onRoomPointerUp()"
+            @pointercancel="onRoomPointerUp()"
+            @pointerleave="onRoomPointerUp()"
+            @contextmenu.prevent
           >
             <span class="pin-core">
               <span class="pin-pulse"></span>
               <span class="pin-dot"></span>
             </span>
-            <span class="pin-name">{{ b.name }}</span>
+            <span class="pin-name">{{ m.name }}</span>
           </button>
+
+          <!-- 新建配电房的双击落点预览 -->
+          <span
+            v-if="draftPoint"
+            class="room-draft"
+            :style="{ left: draftPoint.x + '%', top: draftPoint.y + '%' }"
+            aria-hidden="true"
+          >
+            <span class="room-draft-cross"></span>
+          </span>
         </div>
       </div>
     </div>
@@ -356,6 +750,14 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
+    <!-- 操作提示 -->
+    <p class="plan-hint">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="7.2"/><path d="M12 9.2v5.6M9.2 12h5.6"/>
+      </svg>
+      双击空白处新增监测点 · 点击监测点可查看功率数据
+    </p>
+
     <!-- 楼宇高压功率面板 -->
     <transition name="panel-slide">
       <aside v-if="selected && summary" class="power-panel">
@@ -364,9 +766,22 @@ onBeforeUnmount(() => {
             <span class="pp-dot"></span>
             <div>
               <h3 class="pp-name">{{ selected.name }}</h3>
-              <p class="pp-station">{{ selected.station }}</p>
+              <p class="pp-station">
+                <template v-if="isReal">{{ summary.station }}<template v-if="feederText"> · {{ feederText }}</template></template>
+                <template v-else>{{ selected.station }}</template>
+              </p>
             </div>
           </div>
+          <button
+            class="pp-del"
+            type="button"
+            title="删除该监测点"
+            @click="askDeleteSelected"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m-9 0l1 13h10l1-13"/>
+            </svg>
+          </button>
           <button class="pp-close" type="button" aria-label="关闭" @click="closePanel">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 6l12 12M18 6L6 18"/></svg>
           </button>
@@ -374,7 +789,39 @@ onBeforeUnmount(() => {
 
         <!-- 回路参数 -->
         <div class="pp-meta">
-          <span>额定容量 <b>{{ selected.cap }} kVA</b></span>
+          <span class="pp-meta-cap">
+            <template v-if="isReal">
+              <span class="pp-cap-head">
+                额定容量 <b>{{ editingCaps ? draftTotal + ' kVA' : (summary.totalCap != null ? summary.totalCap + ' kVA' : '—') }}</b>
+                <button v-if="!editingCaps && selected.custom" type="button" class="cap-edit-btn" title="修改变压器容量" @click="openCapEdit">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+                  </svg>
+                  修改
+                </button>
+              </span>
+              <i v-if="!editingCaps && capDetailText" class="pp-cap-detail">{{ capDetailText }}</i>
+              <div v-else class="cap-edit">
+                <label v-for="t in capItems" :key="t.label" class="cap-edit-row">
+                  <span>{{ t.label }}<template v-if="t.source">（{{ t.source }}）</template></span>
+                  <select v-model.number="capDraft[t.label.slice(1)]">
+                    <option :value="0">未安装（0 kVA）</option>
+                    <option v-for="c in CAP_OPTIONS" :key="c" :value="c">{{ c }} kVA</option>
+                  </select>
+                </label>
+                <div class="cap-edit-actions">
+                  <button type="button" class="cap-btn cap-btn-cancel" @click="cancelCapEdit">取消</button>
+                  <button type="button" class="cap-btn cap-btn-save" @click="saveCaps">保存</button>
+                </div>
+              </div>
+            </template>
+            <template v-else>
+              额定容量 <b>{{ selected.cap }} kVA</b>
+              <i v-if="selected.cap1" class="pp-cap-detail">
+                T1 {{ selected.cap1 }} · T2 {{ selected.cap2 }}<template v-if="selected.cap3"> · T3 {{ selected.cap3 }} · T4 {{ selected.cap4 }}</template> kVA
+              </i>
+            </template>
+          </span>
           <span>电压 <b>{{ HV_INFO.voltage }} kV</b></span>
           <span>cosφ <b>{{ HV_INFO.cosPhi }}</b></span>
           <span>月均电流 <b>{{ fmt(summary.currentA) }} A</b></span>
@@ -383,7 +830,7 @@ onBeforeUnmount(() => {
         <!-- 三段统计 -->
         <div class="pp-stat-grid">
           <div class="pp-stat">
-            <p class="pp-stat-label">今日均值</p>
+            <p class="pp-stat-label">今日均值<template v-if="isReal"><i class="pp-stat-date">（{{ anchorStr }}）</i></template></p>
             <p class="pp-stat-value">{{ fmt(summary.today.avg) }} <i>kW</i></p>
             <p class="pp-stat-rows">
               <span>当前 <b>{{ fmt(summary.today.current) }}</b></span>
@@ -408,7 +855,7 @@ onBeforeUnmount(() => {
             </p>
           </div>
         </div>
-        <p class="pp-loadbar">
+        <p v-if="summary.loadRate != null" class="pp-loadbar">
           <span class="pp-loadbar-label">月均负载率</span>
           <span class="pp-loadbar-track"><i :style="{ width: Math.min(100, summary.loadRate * 100).toFixed(1) + '%' }"></i></span>
           <b>{{ (summary.loadRate * 100).toFixed(1) }}%</b>
@@ -426,8 +873,8 @@ onBeforeUnmount(() => {
             >{{ t.label }}</button>
           </div>
           <div v-if="range.type === 'custom'" class="range-dates">
-            <label>起 <input type="date" v-model="range.start" :max="todayStr" @change="onDateInput"></label>
-            <label>止 <input type="date" v-model="range.end" :min="range.start" :max="todayStr" @change="onDateInput"></label>
+            <label>起 <input type="date" v-model="range.start" :min="rangeBounds.min" :max="rangeBounds.max" @change="onDateInput"></label>
+            <label>止 <input type="date" v-model="range.end" :min="range.start" :max="rangeBounds.max" @change="onDateInput"></label>
           </div>
         </div>
 
@@ -471,7 +918,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <p class="pp-note">{{ DATA_NOTE }}</p>
+        <p class="pp-note">{{ isReal ? realRangeText : DATA_NOTE }}</p>
       </aside>
     </transition>
 
@@ -515,6 +962,118 @@ onBeforeUnmount(() => {
               allow="fullscreen"
               @load="topoLoading = false"
             ></iframe>
+          </div>
+        </div>
+      </div>
+    </transition>
+
+    <!-- 双击空白处：新建配电房 -->
+    <transition name="room-fade">
+      <div v-if="showCreate" class="room-mask" @click.self="cancelCreate">
+        <div class="room-modal" role="dialog" aria-modal="true" aria-label="新建配电房">
+          <header class="room-modal-head">
+            <span class="room-modal-icon" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                <circle cx="12" cy="12" r="6.5" fill="currentColor" stroke="none"/>
+              </svg>
+            </span>
+            <div>
+              <h3>新建配电房</h3>
+              <p v-if="draftPoint">落点坐标（图面 {{ draftPoint.x.toFixed(1) }}%, {{ draftPoint.y.toFixed(1) }}%）</p>
+            </div>
+            <button class="room-modal-close" type="button" aria-label="取消" @click="cancelCreate">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
+          </header>
+
+          <div class="room-form">
+            <label class="rf-item">
+              <span class="rf-label"><i>*</i> 配电房名称</span>
+              <input
+                v-model="createForm.name"
+                type="text"
+                maxlength="20"
+                placeholder="例如：东区 6# 配电房"
+                @keyup.enter="confirmCreate"
+              >
+            </label>
+
+            <div class="rf-grid4">
+              <label class="rf-item">
+                <span class="rf-label">变压器 1 容量</span>
+                <select v-model="createForm.cap1">
+                  <option v-for="c in ROOM_CAPS" :key="'t1-' + c" :value="c">{{ c }} kVA</option>
+                </select>
+              </label>
+              <label class="rf-item">
+                <span class="rf-label">变压器 2 容量</span>
+                <select v-model="createForm.cap2">
+                  <option v-for="c in ROOM_CAPS" :key="'t2-' + c" :value="c">{{ c }} kVA</option>
+                </select>
+              </label>
+              <label class="rf-item">
+                <span class="rf-label">变压器 3 容量</span>
+                <select v-model="createForm.cap3">
+                  <option v-for="c in ROOM_CAPS" :key="'t3-' + c" :value="c">{{ c }} kVA</option>
+                </select>
+              </label>
+              <label class="rf-item">
+                <span class="rf-label">变压器 4 容量</span>
+                <select v-model="createForm.cap4">
+                  <option v-for="c in ROOM_CAPS" :key="'t4-' + c" :value="c">{{ c }} kVA</option>
+                </select>
+              </label>
+            </div>
+
+            <label class="rf-item">
+              <span class="rf-label">负荷类型</span>
+              <select v-model="createForm.profile">
+                <option v-for="p in ROOM_PROFILES" :key="p.id" :value="p.id">{{ p.label }}</option>
+              </select>
+            </label>
+
+            <label class="rf-item">
+              <span class="rf-label">接入回路</span>
+              <input v-model="createForm.station" type="text" maxlength="30" placeholder="例如：10kV 中心站 · 东区馈线">
+            </label>
+
+            <p class="rf-hint">电压等级固定 10kV，四台配变并列运行（总额定容量 {{ Number(createForm.cap1) + Number(createForm.cap2) + Number(createForm.cap3) + Number(createForm.cap4) }} kVA）；示例平均功率按总额定容量约 45% 负载率估算。</p>
+            <p v-if="createError" class="rf-error">{{ createError }}</p>
+          </div>
+
+          <footer class="room-modal-foot">
+            <button type="button" class="rf-btn rf-btn-ghost" @click="cancelCreate">取消</button>
+            <button type="button" class="rf-btn rf-btn-primary" @click="confirmCreate">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M5 12h14M13 6l6 6-6 6"/>
+              </svg>
+              确认新建
+            </button>
+          </footer>
+        </div>
+      </div>
+    </transition>
+
+    <!-- 长按 / 垃圾桶：删除监测点确认 -->
+    <transition name="room-fade">
+      <div v-if="showDelete" class="del-mask" @click.self="cancelDelete">
+        <div class="del-modal" role="alertdialog" aria-modal="true" aria-label="删除监测点确认">
+          <span class="del-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m-9 0l1 13h10l1-13"/>
+            </svg>
+          </span>
+          <h3>删除监测点</h3>
+          <p>确定要删除「<b>{{ showDelete.name }}</b>」吗？</p>
+          <p class="del-sub">该监测点将从图上移除，刷新后仍保持删除状态。</p>
+          <div class="del-foot">
+            <button type="button" class="rf-btn rf-btn-ghost" @click="cancelDelete">取消</button>
+            <button type="button" class="rf-btn rf-btn-danger" @click="confirmDeleteRoom">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m-9 0l1 13h10l1-13"/>
+              </svg>
+              确认删除
+            </button>
           </div>
         </div>
       </div>
@@ -590,6 +1149,33 @@ onBeforeUnmount(() => {
   background: none;
   cursor: pointer;
   z-index: 2;
+}
+/* 新建点位：零尺寸锚点 —— 圆点中心与双击坐标完全重合，标签独立向右延伸 */
+.bmap-pin.is-anchored {
+  display: block;
+  width: 0;
+  height: 0;
+  padding: 0;
+  transform: none;
+}
+.bmap-pin.is-anchored .pin-core {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform: translate(-50%, -50%);
+}
+/* 透明热区，保证点击 / 长按容易命中 */
+.bmap-pin.is-anchored .pin-core::after {
+  content: '';
+  position: absolute;
+  inset: -10px;
+}
+.bmap-pin.is-anchored .pin-name {
+  position: absolute;
+  left: 13px;
+  top: 0;
+  transform: translateY(-50%);
+  pointer-events: auto;
 }
 .pin-core {
   position: relative;
@@ -982,6 +1568,29 @@ onBeforeUnmount(() => {
 .plan-zoom button:last-child { border-bottom: none; }
 .plan-zoom button:hover { background: rgba(0, 212, 255, 0.15); color: #eafaff; }
 
+/* 操作提示 */
+.plan-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  z-index: 55;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: #8fd8f7;
+  background: rgba(6, 20, 34, 0.78);
+  border: 1px solid rgba(0, 212, 255, 0.4);
+  border-radius: 20px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4), 0 0 14px rgba(0, 150, 220, 0.2);
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
 /* ---------- 数据面板 ---------- */
 .power-panel {
   position: absolute;
@@ -1043,6 +1652,26 @@ onBeforeUnmount(() => {
   transition: color 0.15s;
 }
 .pp-close:hover { color: #8fd8f7; }
+.pp-del {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-right: 2px;
+  color: #c08b7a;
+  cursor: pointer;
+  background: none;
+  border: 1px solid rgba(192, 139, 122, 0.35);
+  border-radius: 6px;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.pp-del:hover {
+  color: #ff9c98;
+  border-color: rgba(227, 112, 107, 0.7);
+  background: rgba(227, 112, 107, 0.1);
+}
 
 .pp-meta {
   display: flex;
@@ -1059,6 +1688,111 @@ onBeforeUnmount(() => {
   color: #cdeefb;
   margin-left: 3px;
 }
+.pp-meta-cap {
+  flex: 0 0 100%;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.pp-cap-detail {
+  display: block;
+  margin-top: 1px;
+  font-style: normal;
+  font-family: var(--font-num);
+  font-size: 9.5px;
+  letter-spacing: 0.03em;
+  color: #6f96af;
+}
+.pp-cap-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.cap-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px 2px;
+  font-size: 9.5px;
+  letter-spacing: 0.05em;
+  color: #7be9f5;
+  background: rgba(0, 200, 230, 0.08);
+  border: 1px solid rgba(0, 212, 255, 0.35);
+  border-radius: 9px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.cap-edit-btn:hover {
+  background: rgba(0, 200, 230, 0.2);
+  border-color: rgba(0, 229, 255, 0.7);
+}
+.cap-edit {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  margin-top: 7px;
+  padding: 10px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 9px 10px;
+  background: rgba(0, 30, 48, 0.55);
+  border: 1px solid rgba(0, 212, 255, 0.25);
+  border-radius: 8px;
+}
+.cap-edit-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  min-width: 0;
+  font-size: 10.5px;
+  color: #9cc4da;
+  white-space: nowrap;
+}
+.cap-edit-row select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 5px 6px;
+  font-size: 11px;
+  color: #cfeef7;
+  background: rgba(4, 20, 32, 0.9);
+  border: 1px solid rgba(0, 212, 255, 0.3);
+  border-radius: 5px;
+  outline: none;
+  cursor: pointer;
+}
+.cap-edit-row select:focus { border-color: rgba(0, 229, 255, 0.8); }
+.cap-edit-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 3px;
+  min-width: 0;
+}
+.cap-btn {
+  min-width: 64px;
+  padding: 5px 16px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.cap-btn-cancel {
+  color: #8fb4c8;
+  background: transparent;
+  border: 1px solid rgba(120, 170, 195, 0.4);
+}
+.cap-btn-cancel:hover { border-color: rgba(160, 205, 225, 0.8); color: #cfe6f2; }
+.cap-btn-save {
+  color: #04222e;
+  background: linear-gradient(135deg, #6ef0ff, #00c9e6);
+  border: 1px solid rgba(110, 240, 255, 0.7);
+  font-weight: 600;
+}
+.cap-btn-save:hover { box-shadow: 0 0 10px rgba(0, 229, 255, 0.45); }
 
 .pp-stat-grid {
   display: grid;
@@ -1079,6 +1813,11 @@ onBeforeUnmount(() => {
   letter-spacing: 0.05em;
   color: #7fa6c0;
   white-space: nowrap;
+}
+.pp-stat-date {
+  font-style: normal;
+  color: #5f86a3;
+  font-size: 10px;
 }
 .pp-stat-value {
   margin-top: 3px;
@@ -1332,6 +2071,311 @@ onBeforeUnmount(() => {
 .panel-slide-enter-from,
 .panel-slide-leave-to { transform: translateX(24px); opacity: 0; }
 
+/* ---------- 长按监测点：红色预警反馈（提示将删除） ---------- */
+.bmap-pin.is-pressing { z-index: 8; touch-action: none; }
+.bmap-pin.is-pressing .pin-dot {
+  transform: translate(-50%, -50%) scale(1.4);
+  background: radial-gradient(circle at 35% 30%, #ffe0dc 0%, #ff8f7a 48%, #a8291f 100%);
+  border-color: rgba(255, 200, 190, 0.95);
+  box-shadow: 0 0 12px rgba(255, 90, 70, 0.95), 0 0 28px rgba(227, 75, 63, 0.6);
+}
+.bmap-pin.is-pressing .pin-pulse {
+  border-color: rgba(255, 110, 90, 0.85);
+  animation-duration: 0.6s;
+}
+.bmap-pin.is-pressing .pin-name {
+  color: #ffd0c8;
+  border-color: rgba(255, 110, 90, 0.85);
+  background: rgba(40, 10, 6, 0.9);
+}
+
+/* 双击落点预览（与监测点同一青色） */
+.room-draft {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 7;
+}
+.room-draft-cross {
+  position: absolute;
+  inset: 0;
+  border: 1.5px dashed rgba(0, 229, 255, 0.95);
+  border-radius: 50%;
+  animation: draftBlink 0.9s ease-in-out infinite;
+}
+.room-draft-cross::before,
+.room-draft-cross::after {
+  content: '';
+  position: absolute;
+  background: rgba(0, 229, 255, 0.9);
+}
+.room-draft-cross::before { left: 50%; top: -7px; width: 1px; height: calc(100% + 14px); transform: translateX(-0.5px); }
+.room-draft-cross::after { top: 50%; left: -7px; height: 1px; width: calc(100% + 14px); transform: translateY(-0.5px); }
+@keyframes draftBlink {
+  0%, 100% { opacity: 1; box-shadow: 0 0 12px rgba(0, 229, 255, 0.7); }
+  50% { opacity: 0.35; box-shadow: 0 0 3px rgba(0, 229, 255, 0.3); }
+}
+
+/* ---------- 新建配电房弹窗 ---------- */
+.room-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 320;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(3, 9, 16, 0.66);
+  backdrop-filter: blur(3px);
+}
+.room-modal {
+  width: min(440px, 100%);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: linear-gradient(170deg, #12263c, #0a1626);
+  border: 1.5px solid rgba(0, 212, 255, 0.55);
+  border-radius: 12px;
+  box-shadow:
+    0 26px 60px rgba(0, 0, 0, 0.6),
+    0 0 40px rgba(0, 150, 220, 0.25),
+    inset 0 0 30px rgba(0, 40, 70, 0.3);
+}
+.room-modal-head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 13px 15px;
+  border-bottom: 1px solid rgba(0, 212, 255, 0.28);
+  background: linear-gradient(90deg, rgba(0, 90, 130, 0.3), rgba(10, 22, 38, 0.5));
+}
+.room-modal-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: 7px;
+  color: #001a2e;
+  background: linear-gradient(135deg, #8ff2ff, #00c9e6);
+  border: 1px solid rgba(190, 246, 255, 0.85);
+  box-shadow: 0 0 12px rgba(0, 229, 255, 0.45);
+}
+.room-modal-head h3 {
+  font-size: 14.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #eafaff;
+}
+.room-modal-head p {
+  margin-top: 2px;
+  font-family: var(--font-num);
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  color: #7fa6c0;
+}
+.room-modal-close {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  color: #7fa6c0;
+  cursor: pointer;
+  background: none;
+  border: 1px solid rgba(127, 166, 192, 0.3);
+  border-radius: 6px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.room-modal-close:hover { color: #ff9c98; border-color: rgba(227, 112, 107, 0.6); }
+
+.room-form {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 16px 15px 6px;
+}
+.rf-row { display: flex; gap: 12px; }
+.rf-row .rf-item { flex: 1; }
+/* 四台变压器容量：2 × 2 网格 */
+.rf-grid4 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.rf-item { display: flex; flex-direction: column; gap: 6px; }
+.rf-label {
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+  color: #a9c6dc;
+}
+.rf-label i {
+  font-style: normal;
+  color: #00d4ff;
+  margin-right: 2px;
+}
+.rf-item input,
+.rf-item select {
+  width: 100%;
+  padding: 8px 10px;
+  font-family: var(--font);
+  font-size: 12.5px;
+  color: #e8f1f8;
+  background: rgba(6, 20, 34, 0.85);
+  border: 1px solid rgba(0, 212, 255, 0.3);
+  border-radius: 6px;
+  outline: none;
+  color-scheme: dark;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.rf-item select { cursor: pointer; }
+.rf-item input:focus,
+.rf-item select:focus {
+  border-color: #00e5ff;
+  box-shadow: 0 0 10px rgba(0, 229, 255, 0.35);
+}
+.rf-item input::placeholder { color: #5f8199; }
+.rf-hint {
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: #6f93ad;
+  letter-spacing: 0.03em;
+}
+.rf-error {
+  font-size: 11px;
+  color: #ff8f8a;
+  letter-spacing: 0.04em;
+}
+.room-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 15px 15px;
+}
+.rf-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 18px;
+  font-family: var(--font);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s, border-color 0.15s, color 0.15s, background 0.15s;
+}
+.rf-btn-ghost {
+  color: #8fb4cc;
+  background: none;
+  border: 1px solid rgba(143, 180, 204, 0.4);
+}
+.rf-btn-ghost:hover { color: #dceaf5; border-color: rgba(143, 180, 204, 0.8); }
+.rf-btn-primary {
+  color: #001a2e;
+  background: linear-gradient(135deg, #00e5ff, #0099cc);
+  border: 1px solid rgba(190, 246, 255, 0.9);
+  box-shadow: 0 0 16px rgba(0, 229, 255, 0.4);
+}
+.rf-btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 0 24px rgba(0, 229, 255, 0.65);
+}
+.rf-btn-danger {
+  color: #ffe8e5;
+  background: linear-gradient(135deg, #e0594b, #c2362b);
+  border: 1px solid rgba(255, 150, 135, 0.8);
+  box-shadow: 0 0 16px rgba(227, 75, 63, 0.35);
+}
+.rf-btn-danger:hover {
+  transform: translateY(-1px);
+  background: linear-gradient(135deg, #f06757, #d2402f);
+  box-shadow: 0 0 24px rgba(227, 75, 63, 0.6);
+}
+
+/* ---------- 长按删除确认弹窗 ---------- */
+.del-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 330;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(3, 9, 16, 0.66);
+  backdrop-filter: blur(3px);
+}
+.del-modal {
+  width: min(360px, 100%);
+  padding: 22px 22px 18px;
+  text-align: center;
+  background: linear-gradient(170deg, #2b1c20, #151019);
+  border: 1.5px solid rgba(227, 112, 107, 0.55);
+  border-radius: 12px;
+  box-shadow:
+    0 26px 60px rgba(0, 0, 0, 0.6),
+    0 0 40px rgba(227, 75, 63, 0.2),
+    inset 0 0 30px rgba(60, 12, 8, 0.3);
+}
+.del-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  margin-bottom: 12px;
+  border-radius: 50%;
+  color: #ff8f85;
+  background: rgba(227, 75, 63, 0.12);
+  border: 1.5px solid rgba(227, 112, 107, 0.55);
+  box-shadow: 0 0 18px rgba(227, 75, 63, 0.3);
+}
+.del-modal h3 {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #ffe8e5;
+}
+.del-modal p {
+  margin-top: 8px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: #c2a6a2;
+}
+.del-modal p b {
+  color: #ffb4ad;
+  font-weight: 600;
+}
+.del-sub {
+  font-size: 11px !important;
+  color: #8a7170 !important;
+}
+.del-foot {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 18px;
+}
+.del-foot .rf-btn { padding: 8px 22px; }
+
+.room-fade-enter-active,
+.room-fade-leave-active { transition: opacity 0.2s ease; }
+.room-fade-enter-active .room-modal,
+.room-fade-leave-active .room-modal,
+.room-fade-enter-active .del-modal,
+.room-fade-leave-active .del-modal { transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s; }
+.room-fade-enter-from,
+.room-fade-leave-to { opacity: 0; }
+.room-fade-enter-from .room-modal,
+.room-fade-leave-to .room-modal,
+.room-fade-enter-from .del-modal,
+.room-fade-leave-to .del-modal { transform: translateY(14px) scale(0.97); opacity: 0; }
+
 /* ---------- 响应式 ---------- */
 @media (max-width: 900px) {
   .power-panel {
@@ -1350,11 +2394,13 @@ onBeforeUnmount(() => {
   .topo-entry-text i { display: none; }
   .topo-entry-arrow { display: none; }
   .topo-mask { padding: 14px; }
+  .cap-edit { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .hud-scan, .pin-pulse, .topo-entry { animation: none; }
+  .hud-scan, .pin-pulse, .topo-entry, .room-draft-cross { animation: none; }
   .pin-pulse { opacity: 0; }
   .panel-slide-enter-active, .panel-slide-leave-active { transition: none; }
   .topo-fade-enter-active, .topo-fade-leave-active { transition: none; }
+  .room-fade-enter-active, .room-fade-leave-active { transition: none; }
 }
 </style>

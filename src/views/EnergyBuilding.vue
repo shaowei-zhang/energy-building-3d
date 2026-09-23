@@ -14,7 +14,7 @@ const zoom = ref(initialHash === '3d' ? 18 : 11)
 const modeMeta = {
   map: { badge: '地图态', title: '能源楼 3D 总览', sub: '河海大学 · 三校区分布与能源楼运行示例' },
   '3d': { badge: '3D 态', title: '能源楼 3D 总览', sub: '河海大学 · 能源楼 3D 楼宇运行示例' },
-  plan: { badge: '平面态', title: '江宁校区 · 平面功率监测', sub: '河海大学江宁校区 · 10kV 高压功率示例数据' }
+  plan: { badge: '平面态', title: '江宁校区 · 平面功率监测', sub: '河海大学江宁校区 · 10kV 中心站实测功率数据（6–9 月）' }
 }
 const meta = computed(() => modeMeta[mode.value])
 

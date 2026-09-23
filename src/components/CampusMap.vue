@@ -58,8 +58,7 @@ function popupHtml(c) {
       <div class="popup-name">${c.name}</div>
       <div class="popup-region">${c.city} · ${c.district}</div>
       <div class="popup-line"><span class="popup-label">详细地址</span><span class="popup-text">${c.addr}</span></div>
-      <div class="popup-line"><span class="popup-label">经纬度（约）</span><span class="popup-text">${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}</span></div>
-      <div class="popup-line"><span class="popup-label">备注</span><span class="popup-text">${c.remark}</span></div>
+      <div class="popup-line"><span class="popup-label">经纬度</span><span class="popup-text">${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}</span></div>
       <button class="popup-enter-3d" type="button">
         ${c.hasPlan ? `
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true">
@@ -130,10 +129,19 @@ onMounted(() => {
     // 改为等 flyTo 落位后再展开，展开后的对齐由 popupopen 里的 placePopup 完成
     marker.off('click')
 
-    // 弹窗里的按钮由 Leaflet 动态插入，需要手动绑定
+    // 弹窗里的按钮由 Leaflet 动态插入，需要手动绑定。
+    // 注意：必须委托到弹窗根元素而不是按钮本身——placePopup() 在视口
+    // 高度不足时会调用 popup.update()，Leaflet 会重写 contentNode.innerHTML
+    // 重建按钮 DOM，直接绑在按钮上的监听器会随之丢失（表现为点击无反应）。
+    // .leaflet-popup 根元素在 update 中保留，委托监听不受影响。
     marker.on('popupopen', (e) => {
-      const btn = e.popup.getElement()?.querySelector('.popup-enter-3d')
-      if (btn) btn.addEventListener('click', () => emitEnter())
+      const popupEl = e.popup.getElement()
+      if (popupEl && !popupEl.dataset.enterBound) {
+        popupEl.dataset.enterBound = '1'
+        popupEl.addEventListener('click', (ev) => {
+          if (ev.target.closest && ev.target.closest('.popup-enter-3d')) emitEnter()
+        })
+      }
       // 进页面后点击点位、下钻落位、已到位再点击，弹窗都要在视口内完整可见
       placePopup(marker)
     })
