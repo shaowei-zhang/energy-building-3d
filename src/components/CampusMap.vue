@@ -51,8 +51,7 @@ function popupHtml(c) {
       <div class="popup-name">${c.name}</div>
       <div class="popup-region">${c.city} · ${c.district}</div>
       <div class="popup-line"><span class="popup-label">详细地址</span><span class="popup-text">${c.addr}</span></div>
-      <div class="popup-line"><span class="popup-label">经纬度（约）</span><span class="popup-text">${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}</span></div>
-      <div class="popup-line"><span class="popup-label">备注</span><span class="popup-text">${c.remark}</span></div>
+      <div class="popup-line"><span class="popup-label">经纬度</span><span class="popup-text">${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}</span></div>
       <button class="popup-enter-3d" type="button">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
           <path d="M12 2.6l7.4 4.2L12 11 4.6 6.8 12 2.6z" fill="currentColor" opacity=".9"/>
@@ -105,6 +104,13 @@ onMounted(() => {
   })
   gaode.addTo(map)
 
+  // 弹窗按钮点击：使用事件委托。
+  // 原因：placePopup 会调用 popup.update()，Leaflet 内部以 innerHTML 重建弹窗内容，
+  // 直接绑在按钮上的监听器会随旧 DOM 一起失效；委托在地图容器上则始终有效
+  map.getContainer().addEventListener('click', (e) => {
+    if (e.target.closest('.popup-enter-3d')) emit('enter3d')
+  })
+
   // 三校区点位
   const campusMarkers = []
   CAMPUSES.forEach((c) => {
@@ -127,11 +133,8 @@ onMounted(() => {
     // 改为等 flyTo 落位后再展开，展开后的对齐由 popupopen 里的 placePopup 完成
     marker.off('click')
 
-    // 弹窗里的按钮由 Leaflet 动态插入，需要手动绑定
-    marker.on('popupopen', (e) => {
-      const btn = e.popup.getElement()?.querySelector('.popup-enter-3d')
-      if (btn) btn.addEventListener('click', () => emit('enter3d'))
-      // 进页面后点击点位、下钻落位、已到位再点击，弹窗都要在视口内完整可见
+    // 弹窗内容定位（按钮点击改用容器事件委托，见下方）
+    marker.on('popupopen', () => {
       placePopup(marker)
     })
 
@@ -292,27 +295,32 @@ onBeforeUnmount(() => {
   font-family: var(--font);
   outline: none;
 }
+/* 浅色高德/OSM 瓦片整体转为深色科技底：反相 + 色相 180° 保持水系为青蓝。
+   滤镜只加在 tilePane，标记、弹窗、控件所在的其它 pane 不受影响 */
+.leaflet-tile-pane {
+  filter: invert(.92) hue-rotate(180deg) brightness(.94) saturate(.72) contrast(.94);
+}
 .leaflet-container::after {
   content: "";
   position: absolute;
   inset: 0;
   z-index: 350;
   pointer-events: none;
-  background: radial-gradient(130% 90% at 50% 0%, rgba(255,245,225,.15), transparent 55%),
-              linear-gradient(180deg, rgba(237,228,211,.06), rgba(212,197,169,.04));
+  background: radial-gradient(130% 90% at 50% 0%, rgba(70, 168, 214, .10), transparent 55%),
+              linear-gradient(180deg, rgba(46, 134, 171, .05), rgba(6, 18, 36, .12));
 }
-.leaflet-control-zoom { border: none !important; box-shadow: 0 4px 14px rgba(139,115,85,.18) !important; }
+.leaflet-control-zoom { border: none !important; box-shadow: 0 4px 16px rgba(2, 10, 22, .5) !important; }
 .leaflet-control-zoom a {
   width: 34px !important; height: 34px !important; line-height: 34px !important;
-  background: rgba(255,250,242,.92) !important;
-  color: var(--accent) !important;
-  border: 1px solid var(--line) !important;
+  background: rgba(13, 32, 50, .9) !important;
+  color: #9BDDF8 !important;
+  border: 1px solid rgba(143, 216, 247, .3) !important;
   backdrop-filter: blur(4px);
   font-size: 18px !important;
 }
-.leaflet-control-zoom a:hover { background: #fff !important; color: var(--txt) !important; }
+.leaflet-control-zoom a:hover { background: rgba(27, 58, 84, .95) !important; color: #EAF6FF !important; }
 .leaflet-control-attribution {
-  background: rgba(255,250,242,.8) !important;
+  background: rgba(8, 21, 34, .78) !important;
   color: var(--txt-dim) !important;
   font-size: 10px;
   backdrop-filter: blur(4px);
@@ -336,29 +344,29 @@ onBeforeUnmount(() => {
 .campus-emblem {
   width: 42px; height: 42px; border-radius: 50%;
   margin-bottom: 3px;
-  filter: drop-shadow(0 6px 9px rgba(11,32,56,.42)) drop-shadow(0 0 13px rgba(46,134,171,.6));
+  filter: drop-shadow(0 6px 9px rgba(3,12,24,.55)) drop-shadow(0 0 13px rgba(70,168,214,.65));
   transition: transform .2s, filter .2s;
 }
 .campus-emblem img { display: block; width: 100%; height: 100%; }
 .campus-marker:hover .campus-emblem,
 .campus-marker:focus-visible .campus-emblem {
   transform: scale(1.09);
-  filter: drop-shadow(0 8px 13px rgba(11,32,56,.5)) drop-shadow(0 0 22px rgba(46,134,171,.9));
+  filter: drop-shadow(0 8px 13px rgba(3,12,24,.6)) drop-shadow(0 0 22px rgba(70,168,214,.95));
 }
 .campus-pin {
   width: 0; height: 0;
   border-left: 7px solid transparent; border-right: 7px solid transparent;
-  border-top: 8px solid #2E86AB; margin-top: -1px;
+  border-top: 8px solid #46A8D6; margin-top: -1px;
 }
 .campus-dot {
   position: relative; width: 18px; height: 18px; border-radius: 50%;
-  background: #2E86AB; border: 2.5px solid #fff;
-  box-shadow: 0 0 12px rgba(46,134,171,.8), 0 0 24px rgba(46,134,171,.5);
+  background: #46A8D6; border: 2.5px solid #EAF6FF;
+  box-shadow: 0 0 12px rgba(70,168,214,.9), 0 0 24px rgba(70,168,214,.55);
   margin-top: -2px;
 }
 .campus-dot::after {
   content: ""; position: absolute; inset: -6px; border-radius: 50%;
-  border: 2px solid rgba(46,134,171,.6);
+  border: 2px solid rgba(143,216,247,.7);
   animation: dotPulse 2.6s ease-out infinite;
 }
 @keyframes dotPulse {

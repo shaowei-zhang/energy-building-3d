@@ -11,7 +11,6 @@ export const CAMPUSES = [
     addr: '江苏省南京市鼓楼区西康路 1 号',
     lat: 32.055706,
     lng: 118.759579,
-    remark: '能源楼 3D 楼宇入口',
     has3d: true
   },
   {
@@ -23,7 +22,6 @@ export const CAMPUSES = [
     addr: '江苏省南京市江宁区佛城西路 8 号',
     lat: 31.914453,
     lng: 118.785843,
-    remark: '校区示意标注点',
     has3d: false
   },
   {
@@ -35,7 +33,6 @@ export const CAMPUSES = [
     addr: '江苏省常州市金坛区河海大道 1915 号',
     lat: 31.733,
     lng: 119.48,
-    remark: '坐标为近似值（约）',
     has3d: false
   }
 ]

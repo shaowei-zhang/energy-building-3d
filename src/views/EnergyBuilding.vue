@@ -73,17 +73,17 @@ function backToMap() {
   justify-content: space-between;
   gap: 18px;
   padding: 0 22px;
-  background: linear-gradient(180deg, rgba(255,250,242,.96), rgba(240,231,215,.92));
-  border-bottom: 1px solid var(--line);
-  box-shadow: 0 2px 12px rgba(139,115,85,.12);
-  backdrop-filter: blur(6px);
+  background: linear-gradient(180deg, rgba(11, 26, 44, .96), rgba(8, 19, 34, .94));
+  border-bottom: 1px solid rgba(94, 170, 216, .22);
+  box-shadow: 0 2px 16px rgba(2, 10, 22, .55);
+  backdrop-filter: blur(8px);
   z-index: 1000;
 }
 
 .eb-brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .eb-logo {
   width: 38px; height: 38px; flex: none;
-  filter: drop-shadow(0 4px 8px rgba(11,32,56,.32));
+  filter: drop-shadow(0 4px 8px rgba(3, 12, 24, .6)) drop-shadow(0 0 10px rgba(70, 168, 214, .35));
 }
 .eb-brand-text { min-width: 0; }
 .eb-title {
@@ -110,9 +110,9 @@ function backToMap() {
   border: 1px solid transparent;
 }
 .eb-badge.is-map {
-  color: #1F6E8C;
-  background: rgba(46,134,171,.12);
-  border-color: rgba(46,134,171,.4);
+  color: #9BDDF8;
+  background: rgba(70, 168, 214, .14);
+  border-color: rgba(70, 168, 214, .5);
 }
 .eb-badge.is-3d {
   color: #EAF6FF;
@@ -123,7 +123,7 @@ function backToMap() {
   display: flex; align-items: baseline; gap: 6px;
   padding: 4px 12px;
   border-radius: 999px;
-  background: rgba(255,255,255,.6);
+  background: rgba(13, 32, 50, .7);
   border: 1px solid var(--line);
 }
 .eb-zoom-label { font-size: 10.5px; letter-spacing: .1em; color: var(--txt-dim); }
