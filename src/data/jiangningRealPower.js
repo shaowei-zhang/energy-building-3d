@@ -1,7 +1,7 @@
-// 江宁校区 10kV 中心站真实功率数据适配
-// 数据源：src/mock/中心站高压功率数据.json（6-9 月，1#/2# 中心站）
+// 江宁校区 10kV 中心站真实功率 / 负载率数据适配
+// 数据源：src/mock/中心站高压功率数据_负载率.json（6-9 月，1#/2# 中心站）
 // 输出与 campus.js 中 buildingPowerSummary / buildingSeries 相同形态，供面板直接使用
-import raw from '../mock/中心站高压功率数据.json'
+import raw from '../mock/中心站高压功率数据_负载率.json'
 
 const SQRT3 = 1.732
 const HV_VOLTAGE = 10
@@ -53,17 +53,25 @@ for (const [monthKey, mo] of MONTHS) {
           if (!c.source && t['来源']) c.source = t['来源']
         })
         rec.caps.sort((a, b) => a.no - b.no)
-        const hours = HOUR_ORDER.map((h) => {
+        // hours: 配电房总功率（多变压器求和）；ratePts: 各变压器 JSON 负载率（0-1），查询时按容量加权
+        const hours = []
+        const ratePts = []
+        HOUR_ORDER.forEach((h) => {
           const key = `${h}:00`
           let sum = 0
           let hit = false
+          const rs = []
           for (const t of r['变压器']) {
+            const no = t['编号']
             const v = t['功率kW']?.[key]
             if (v != null && !isNaN(v)) { sum += v; hit = true }
+            const rt = t['负载率']?.[key]
+            if (rt != null && !isNaN(rt)) rs.push({ no, r: rt })
           }
-          return hit ? sum : null
+          hours.push(hit ? sum : null)
+          ratePts.push(rs.length ? rs : null)
         })
-        rec.days.push({ date, hours })
+        rec.days.push({ date, hours, ratePts })
       }
     }
   })
@@ -110,6 +118,33 @@ function validDays(rec) {
 }
 function dayAvg(d) {
   const vals = d.hours.filter((v) => v != null)
+  return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null
+}
+
+// ---------- 负载率（取自 JSON 各变压器“负载率”字段，按容量加权聚合） ----------
+// 权重：覆盖后的有效容量；显式 0（未安装）不参与；容量未知时退化为权重 1（简单平均）
+function capWeight(no, capMap) {
+  const c = capMap?.get(no)
+  if (c === null || c === undefined || isNaN(c)) return 1
+  return c > 0 ? c : 0
+}
+function hourRate(pts, capMap) {
+  if (!pts || !pts.length) return null
+  let s = 0
+  let sw = 0
+  for (const p of pts) {
+    const w = capWeight(p.no, capMap)
+    if (w <= 0) continue
+    s += p.r * w
+    sw += w
+  }
+  return sw ? s / sw : null
+}
+function dayRates(d, capMap) {
+  return (d.ratePts || []).map((pts) => hourRate(pts, capMap))
+}
+function rateDayAvg(d, capMap) {
+  const vals = dayRates(d, capMap).filter((v) => v != null)
   return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null
 }
 
@@ -160,20 +195,37 @@ export function realPowerSummary(realName, overrides) {
     const energy = avgs.reduce((s, v) => s + v * 24, 0) / 1000
     return { avg, max, energy }
   }
-  const todayVals = anchor.hours.filter((v) => v != null)
-  const today = {
-    avg: todayVals.reduce((s, v) => s + v, 0) / todayVals.length,
-    max: Math.max(...todayVals),
-    min: Math.min(...todayVals),
-    current: [...anchor.hours].reverse().find((v) => v != null)
+  // 负载率区间统计（数据全部取自 JSON“负载率”字段，不做 P/S 换算）
+  const rangeRateStats = (days) => {
+    const avgs = days.map((d) => rateDayAvg(d, capMap)).filter((v) => v != null)
+    let max = 0
+    for (const d of days) for (const v of dayRates(d, capMap)) if (v != null && v > max) max = v
+    const avg = avgs.length ? avgs.reduce((s, v) => s + v, 0) / avgs.length : null
+    return { avg, max }
   }
-  const week = rangeStats(slice(7))
-  const month = rangeStats(slice(30))
   const transformers = capsWithOverrides(realName, overrides)
+  const capMap = new Map(transformers.map((c) => [c.no, c.cap]))
   const caps = transformers.map((c) => c.cap).filter((v) => v != null && !isNaN(v))
   const totalCap = caps.length === transformers.length && caps.length
     ? caps.reduce((s, v) => s + v, 0)
     : null
+
+  const todayVals = anchor.hours.filter((v) => v != null)
+  const todayRateVals = dayRates(anchor, capMap).filter((v) => v != null)
+  const today = {
+    avg: todayVals.reduce((s, v) => s + v, 0) / todayVals.length,
+    max: Math.max(...todayVals),
+    min: Math.min(...todayVals),
+    current: [...anchor.hours].reverse().find((v) => v != null),
+    rateAvg: todayRateVals.length ? todayRateVals.reduce((s, v) => s + v, 0) / todayRateVals.length : null,
+    rateMax: todayRateVals.length ? Math.max(...todayRateVals) : null,
+    rateMin: todayRateVals.length ? Math.min(...todayRateVals) : null,
+    rateCurrent: [...dayRates(anchor, capMap)].reverse().find((v) => v != null) ?? null
+  }
+  const week = rangeStats(slice(7))
+  const month = rangeStats(slice(30))
+  const weekRate = rangeRateStats(slice(7))
+  const monthRate = rangeRateStats(slice(30))
 
   return {
     real: true,
@@ -184,23 +236,28 @@ export function realPowerSummary(realName, overrides) {
     today,
     week,
     month,
+    weekRate,
+    monthRate,
     currentA: month.avg / (SQRT3 * HV_VOLTAGE * HV_COSP),
-    loadRate: totalCap ? month.avg / totalCap : null,
+    // 月均负载率：直接使用 JSON 负载率；仅当 JSON 完全缺失时回退 P/S 估算
+    loadRate: monthRate.avg != null ? monthRate.avg : (totalCap ? month.avg / totalCap : null),
     totalCap
   }
 }
 
 // 曲线：today=锚定日 11 个时刻点；其余=区间内每日均值
-export function realPowerSeries(realName, type, start, end) {
+// metric: 'power'(kW，默认) | 'rate'(JSON 负载率，0-1)
+export function realPowerSeries(realName, type, start, end, metric = 'power', overrides = null) {
   const rec = rooms.get(realName)
   if (!rec) return []
   const info = anchorDays(rec)
   if (!info) return []
   const { vd, anchor } = info
+  const capMap = new Map(capsWithOverrides(realName, overrides).map((c) => [c.no, c.cap]))
   if (type === 'today') {
     const pts = []
     HOUR_ORDER.forEach((h, i) => {
-      const v = anchor.hours[i]
+      const v = metric === 'rate' ? hourRate(anchor.ratePts?.[i], capMap) : anchor.hours[i]
       if (v == null) return
       pts.push({
         label: `${`${h}`.padStart(2, '0')}:00`,
@@ -214,7 +271,7 @@ export function realPowerSeries(realName, type, start, end) {
   const pts = []
   for (const d of vd) {
     if (d.date < start || d.date > end) continue
-    const avg = dayAvg(d)
+    const avg = metric === 'rate' ? rateDayAvg(d, capMap) : dayAvg(d)
     if (avg == null) continue
     pts.push({ label: mdLabel(d.date), full: ymd(d.date), v: avg })
   }

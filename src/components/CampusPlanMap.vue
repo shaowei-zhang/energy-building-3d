@@ -32,7 +32,7 @@ function closeTopo() {
 
 // ---------- 选中楼宇与功率总览 ----------
 const selected = ref(null)
-// 命中真实数据（src/mock/中心站高压功率数据.json）的监测点走实测统计；未命中沿用示例生成
+// 命中真实数据（src/mock/中心站高压功率数据_负载率.json）的监测点走实测统计；未命中沿用示例生成
 const realName = computed(() => (selected.value ? resolveRealRoom(selected.value) : null))
 const isReal = computed(() => !!realName.value)
 const summary = computed(() => {
@@ -379,20 +379,30 @@ function onDateInput() {
   if (min && range.end < min) range.end = min
 }
 
-// 切换监测点时按其数据基准日重置曲线范围，并退出容量编辑
-watch(selected, () => { editingCaps.value = false; resetRange('30') })
+// 曲线指标：power=有功功率(kW)；rate=JSON 实测负载率(%)（仅实测点可切）
+const chartMetric = ref('power')
+const isRate = computed(() => isReal.value && chartMetric.value === 'rate')
+
+// 切换监测点时按其数据基准日重置曲线范围，并退出容量编辑、回到功率曲线
+watch(selected, () => {
+  editingCaps.value = false
+  chartMetric.value = 'power'
+  resetRange('30')
+})
 
 const series = computed(() => {
   if (!selected.value) return []
+  const metric = isRate.value ? 'rate' : 'power'
+  const overrides = selected.value.capOverrides || null
   if (range.type === 'today') {
     return isReal.value
-      ? realPowerSeries(realName.value, 'today')
+      ? realPowerSeries(realName.value, 'today', null, null, metric, overrides)
       : buildingSeries(selected.value, 'today')
   }
   const s = new Date(`${range.start}T00:00:00`)
   const e = new Date(`${range.end}T00:00:00`)
   return isReal.value
-    ? realPowerSeries(realName.value, 'day', s, e)
+    ? realPowerSeries(realName.value, 'day', s, e, metric, overrides)
     : buildingSeries(selected.value, 'day', s, e)
 })
 
@@ -419,10 +429,12 @@ const chart = computed(() => {
   const pts = series.value
   const n = pts.length
   if (!n) return null
-  const rawMax = Math.max(...pts.map((p) => p.v), 1)
+  // 负载率 JSON 为 0-1 小数，绘图时换算为百分数
+  const toAxis = (v) => (isRate.value ? v * 100 : v)
+  const rawMax = Math.max(...pts.map((p) => toAxis(p.v)), isRate.value ? 5 : 1)
   const yMax = niceCeil(rawMax * 1.12)
   const xAt = (i) => (n <= 1 ? PW / 2 : (i / (n - 1)) * PW)
-  const yAt = (v) => PH - (v / yMax) * PH
+  const yAt = (v) => PH - (toAxis(v) / yMax) * PH
   const line = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${xAt(i).toFixed(1)},${yAt(p.v).toFixed(1)}`).join(' ')
   const area = `${line} L${xAt(n - 1).toFixed(1)},${PH} L${xAt(0).toFixed(1)},${PH} Z`
   const gridY = [0, 0.25, 0.5, 0.75, 1].map((r) => ({ y: PH - r * PH, value: yMax * r }))
@@ -456,6 +468,10 @@ const hoverPoint = computed(() => {
 })
 
 const fmt = (v) => (v >= 100 ? v.toFixed(0) : v.toFixed(1))
+// 负载率展示：JSON 0-1 小数 → 百分数文本
+const fmtRate = (r) => `${(r * 100).toFixed(1)}%`
+const fmtAxis = (v) => (isRate.value ? `${Math.round(v)}%` : fmt(v))
+const fmtPoint = (v) => (isRate.value ? fmtRate(v) : `${fmt(v)} kW`)
 
 function selectBuilding(b) {
   if (dragMoved.value) return
@@ -878,14 +894,18 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <!-- 功率曲线 -->
+        <!-- 功率 / 负载率曲线 -->
         <div class="pp-chart-head">
-          <span class="pp-chart-title">高压有功功率曲线</span>
-          <span v-if="seriesMeta" class="pp-chart-avg">区间均值 <b>{{ fmt(seriesMeta.avg) }}</b> kW</span>
+          <span class="pp-chart-title">{{ isRate ? '变压器负载率曲线' : '高压有功功率曲线' }}</span>
+          <span v-if="isReal" class="metric-tabs">
+            <button type="button" :class="{ 'is-on': !isRate }" @click="chartMetric = 'power'">功率</button>
+            <button type="button" :class="{ 'is-on': isRate }" @click="chartMetric = 'rate'">负载率</button>
+          </span>
+          <span v-if="seriesMeta" class="pp-chart-avg">区间均值 <b>{{ isRate ? fmtRate(seriesMeta.avg) : fmt(seriesMeta.avg) + ' kW' }}</b></span>
         </div>
         <div v-if="chart" class="pp-chart">
           <div class="chart-y">
-            <span v-for="g in [...chart.gridY].reverse()" :key="g.y">{{ fmt(g.value) }}</span>
+            <span v-for="g in [...chart.gridY].reverse()" :key="g.y">{{ fmtAxis(g.value) }}</span>
           </div>
           <div class="chart-plot" @mousemove="onChartMove" @mouseleave="onChartLeave">
             <svg :viewBox="`0 0 ${PW} ${PH}`" preserveAspectRatio="none" aria-hidden="true">
@@ -909,7 +929,7 @@ onBeforeUnmount(() => {
                 :class="{ 'is-right': hoverPoint.left > 72 }"
                 :style="{ left: hoverPoint.left + '%', top: hoverPoint.top + '%' }"
               >
-                <b>{{ fmt(hoverPoint.p.v) }} kW</b>{{ hoverPoint.p.full }}
+                <b>{{ fmtPoint(hoverPoint.p.v) }}</b>{{ hoverPoint.p.full }}
               </span>
             </template>
           </div>
@@ -1122,8 +1142,8 @@ onBeforeUnmount(() => {
   object-fit: fill;
   -webkit-user-drag: none;
   user-select: none;
-  /* 浅色总平面反转为深色，与高德底图同一处理，再压一点亮度衬托青色 */
-  filter: invert(1) hue-rotate(180deg) saturate(0.62) brightness(0.82) contrast(0.95);
+  /* 浅色总平面反转为深色，与高德底图同一处理；适当提亮、增强饱和与对比保证清晰可读 */
+  filter: invert(1) hue-rotate(180deg) saturate(0.82) brightness(1.02) contrast(1.06);
   border-radius: 2px;
   box-shadow: 0 0 0 1px rgba(0, 212, 255, 0.35), 0 0 50px rgba(0, 150, 220, 0.22), 0 30px 80px rgba(0, 0, 0, 0.6);
 }
@@ -1132,9 +1152,9 @@ onBeforeUnmount(() => {
   inset: 0;
   pointer-events: none;
   background:
-    radial-gradient(ellipse 75% 65% at 50% 45%, rgba(0, 120, 170, 0.08), transparent 70%),
-    linear-gradient(180deg, rgba(2, 14, 26, 0.12), rgba(2, 10, 20, 0.32));
-  box-shadow: inset 0 0 90px rgba(0, 60, 100, 0.35);
+    radial-gradient(ellipse 75% 65% at 50% 45%, rgba(0, 120, 170, 0.05), transparent 70%),
+    linear-gradient(180deg, rgba(2, 14, 26, 0.05), rgba(2, 10, 20, 0.14));
+  box-shadow: inset 0 0 60px rgba(0, 60, 100, 0.18);
 }
 
 /* ---------- 楼宇监测点 ---------- */
@@ -1942,6 +1962,32 @@ onBeforeUnmount(() => {
   font-weight: 600;
   letter-spacing: 0.08em;
   color: #bfe0f0;
+}
+.metric-tabs {
+  display: inline-flex;
+  margin-left: auto;
+  margin-right: 10px;
+  border: 1px solid rgba(0, 212, 255, 0.28);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.metric-tabs button {
+  padding: 3px 10px;
+  font-family: var(--font);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: #8fb4cc;
+  background: rgba(6, 20, 34, 0.6);
+  border: none;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.metric-tabs button + button { border-left: 1px solid rgba(0, 212, 255, 0.28); }
+.metric-tabs button:hover { color: #cdeefb; }
+.metric-tabs button.is-on {
+  color: #001a2e;
+  font-weight: 700;
+  background: linear-gradient(135deg, #00e5ff, #0099cc);
 }
 .pp-chart-avg { font-size: 10.5px; color: #7fa6c0; }
 .pp-chart-avg b {
