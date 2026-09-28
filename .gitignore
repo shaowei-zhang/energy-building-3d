@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
+# Large 3D models (distributed out-of-band)
+src/model/*.glb
 
 # Editor directories and files
 .vscode/*
