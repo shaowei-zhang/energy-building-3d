@@ -278,4 +278,57 @@ export function realPowerSeries(realName, type, start, end, metric = 'power', ov
   return pts
 }
 
+// 全部配电房实测数据覆盖的全局有效日期范围（用于总览日期选择）
+export function realDataBounds() {
+  let min = null
+  let max = null
+  for (const rec of rooms.values()) {
+    for (const d of rec.days) {
+      if (!d.hours.some((v) => v != null)) continue
+      if (!min || d.date < min) min = d.date
+      if (!max || d.date > max) max = d.date
+    }
+  }
+  return min && max ? { min, max } : null
+}
+
+// 指定日期的单房数据：11 个时刻功率/负载率 + 当日统计；该日无任何有效点时返回 null
+export function realDayRecord(realName, date, overrides = null) {
+  const rec = rooms.get(realName)
+  if (!rec || !date) return null
+  const target = ymd(date)
+  const day = rec.days.find((d) => ymd(d.date) === target)
+  if (!day) return null
+  const capMap = new Map(capsWithOverrides(realName, overrides).map((c) => [c.no, c.cap]))
+  const allCaps = capsWithOverrides(realName, overrides).map((c) => c.cap)
+  const totalCapKva = allCaps.length && allCaps.every((v) => v != null && !isNaN(v))
+    ? allCaps.reduce((s, v) => s + v, 0)
+    : null
+
+  const hours = HOUR_ORDER.map((h, i) => ({
+    h,
+    v: day.hours[i],
+    rate: hourRate(day.ratePts?.[i], capMap)
+  }))
+  const vals = hours.filter((p) => p.v != null)
+  if (!vals.length) return null
+  const latest = [...vals].reverse()[0]
+  const rateVals = hours.map((p) => p.rate).filter((v) => v != null)
+  return {
+    date: day.date,
+    station: rec.station,
+    hours,
+    totalCap: totalCapKva,
+    stats: {
+      avg: vals.reduce((s, p) => s + p.v, 0) / vals.length,
+      max: Math.max(...vals.map((p) => p.v)),
+      min: Math.min(...vals.map((p) => p.v)),
+      latest: latest.v,
+      latestHour: latest.h,
+      rateAvg: rateVals.length ? rateVals.reduce((s, v) => s + v, 0) / rateVals.length : null,
+      rateMax: rateVals.length ? Math.max(...rateVals) : null
+    }
+  }
+}
+
 export const REAL_HV_INFO = { voltage: HV_VOLTAGE, cosPhi: HV_COSP }

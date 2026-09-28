@@ -1,5 +1,6 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import * as echarts from 'echarts'
 import {
   JIANGNING_BUILDINGS,
   buildingPowerSummary,
@@ -10,7 +11,9 @@ import {
 import {
   resolveRealRoom,
   realPowerSummary,
-  realPowerSeries
+  realPowerSeries,
+  realDataBounds,
+  realDayRecord
 } from '../data/jiangningRealPower'
 import mapImg from '../assets/江宁校园地图.jpg'
 
@@ -29,6 +32,593 @@ function closeTopo() {
   showTopo.value = false
   topoLoading.value = false
 }
+
+// ---------- 配电房用电负载总览（全校聚合统计弹窗） ----------
+const showOverview = ref(false)
+const ovDate = ref('') // 总览查询日期 yyyy-mm-dd
+const ovBounds = reactive({ min: '', max: '' })
+const ovRoomId = ref('') // 单房时间分析当前选中
+function openOverview() {
+  // 默认日期取实测数据最后有效日，并限定可选区间
+  const b = realDataBounds()
+  if (b) {
+    ovBounds.min = toInput(b.min)
+    ovBounds.max = toInput(b.max)
+    const outOfRange = !ovDate.value || ovDate.value < ovBounds.min || ovDate.value > ovBounds.max
+    if (outOfRange) {
+      // 边界末日可能只有零星采样点，向前找一个各监测房时刻齐全的完整日
+      const FULL_POINTS = 11
+      const dayOk = (d) => allMarkers.value.every((m) => {
+        const rn = resolveRealRoom(m)
+        if (!rn) return true
+        const rec = realDayRecord(rn, d, m.capOverrides)
+        return !!rec && rec.hours.filter((p) => p.v != null).length >= FULL_POINTS
+      })
+      let d = b.max
+      while (d > b.min && !dayOk(d)) d = new Date(d.getTime() - 86400000)
+      ovDate.value = toInput(dayOk(d) ? d : b.max)
+    }
+  } else if (!ovDate.value) {
+    ovDate.value = toInput(new Date())
+  }
+  showOverview.value = true
+}
+function closeOverview() { showOverview.value = false }
+
+const CN_NUM = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 }
+// 解析配电房编号，用于下拉排序：“综合实验楼配电房/9号配电房”→9、“14号站配电房”→14
+function roomOrderNo(name) {
+  const s = String(name)
+  const m = s.match(/(\d+)\s*号/)
+  if (m) return parseInt(m[1], 10)
+  for (const [cn, no] of Object.entries(CN_NUM)) {
+    if (s.includes(`${cn}号`)) return no
+  }
+  return 99
+}
+const hourLabel = (h) => `${`${h}`.padStart(2, '0')}:00`
+
+// 时段划分（与真实数据采样时刻 0/6/8/10/12/14/16/18/20/21/22 对齐）
+const OV_BUCKETS = [
+  { key: 'night', label: '凌晨夜间', hours: [0, 6] },
+  { key: 'am', label: '上午', hours: [8, 10] },
+  { key: 'noon', label: '中午', hours: [12, 14] },
+  { key: 'pm', label: '下午', hours: [16, 18] },
+  { key: 'evening', label: '晚间', hours: [20, 21, 22] }
+]
+
+// 经济运行阈值：峰值负载率 ≥85% 重载、60–85% 偏高、40–60% 正常、<40% 裕度充裕
+function marginStatus(rate) {
+  if (rate == null) return { label: '容量待录入', cls: 'na' }
+  if (rate >= 0.85) return { label: '重载', cls: 'danger' }
+  if (rate >= 0.6) return { label: '偏高', cls: 'warn' }
+  if (rate >= 0.4) return { label: '正常', cls: 'normal' }
+  return { label: '充裕', cls: 'good' }
+}
+
+const overview = computed(() => {
+  if (!ovDate.value) return null
+  const date = new Date(`${ovDate.value}T00:00:00`)
+  const cos = HV_INFO.cosPhi
+  const rooms = allMarkers.value.map((m) => {
+    const rn = resolveRealRoom(m)
+    let avg, peak, valley, latest, latestHour, cap, hourlyRaw, rateMap = null, rateMax = null, rateDayAvg = null
+    if (rn) {
+      const rec = realDayRecord(rn, date, m.capOverrides)
+      if (!rec) return null
+      avg = rec.stats.avg
+      peak = rec.stats.max
+      valley = rec.stats.min
+      latest = rec.stats.latest
+      latestHour = rec.stats.latestHour
+      cap = rec.totalCap
+      hourlyRaw = rec.hours
+      rateMap = new Map(rec.hours.filter((p) => p.rate != null).map((p) => [p.h, p.rate]))
+      rateMax = rec.stats.rateMax // 当日实测负载率的最大值（JSON 口径）
+      rateDayAvg = rec.stats.rateAvg // 当日实测负载率的平均值（JSON 口径）
+    } else {
+      const sm = buildingPowerSummary(m, date)
+      avg = sm.today.avg
+      peak = sm.today.max
+      valley = sm.today.min
+      latest = sm.today.current
+      const series = buildingSeries(m, 'today', null, null, date)
+      latestHour = series.length ? parseInt(series[series.length - 1].label.slice(0, 2), 10) : 0
+      cap = m.cap ?? null
+      hourlyRaw = series
+        .map((p) => ({ h: parseInt(p.label.slice(0, 2), 10), v: p.v }))
+    }
+    const ratedKw = cap != null && cap > 0 ? cap * cos : null
+    const hourly = hourlyRaw
+      .filter((p) => p.v != null)
+      .map((p) => ({ h: p.h, label: hourLabel(p.h), v: p.v, rate: rateMap?.get(p.h) ?? null }))
+    // 负载率优先采用 JSON 实测值（与分时图 tooltip 的“变压器负载率”同一口径，按视在功率/容量）
+    // 峰值负载率 = 当日各时刻实测负载率的最大值；无实测数据时回退 P/(容量×cosφ) 估算
+    const estPeakRate = ratedKw ? peak / ratedKw : null
+    const estAvgRate = ratedKw ? avg / ratedKw : null
+    return {
+      id: m.id,
+      name: m.name, // 图表与列表统一使用全名，如“中心配电房/一号配电房”
+      orderNo: roomOrderNo(m.name),
+      real: !!rn,
+      avg,
+      peak,
+      valley,
+      latest,
+      latestHour,
+      cap,
+      ratedKw,
+      peakRate: rn ? (rateMax ?? estPeakRate) : estPeakRate,
+      avgRate: rn ? (rateDayAvg ?? estAvgRate) : estAvgRate,
+      // 可调配裕度：额定有功 − 当日峰值（最保守口径）
+      margin: ratedKw != null ? Math.max(0, ratedKw - peak) : null,
+      hourly
+    }
+  }).filter(Boolean)
+  if (!rooms.length) return null
+
+  // 柱状图/饼图统一按当日平均负载从大到小排序
+  const roomsSorted = [...rooms].sort((a, b) => b.avg - a.avg)
+  const roomsByNo = [...rooms].sort((a, b) => a.orderNo - b.orderNo || a.name.localeCompare(b.name, 'zh'))
+
+  // 校区总功率时刻曲线（各配电房同一时刻求和）
+  const hourSet = new Set()
+  rooms.forEach((r) => r.hourly.forEach((p) => hourSet.add(p.h)))
+  const campusHourly = [...hourSet].sort((a, b) => a - b).map((h) => {
+    let sum = 0
+    let n = 0
+    rooms.forEach((r) => {
+      const p = r.hourly.find((q) => q.h === h)
+      if (p) { sum += p.v; n++ }
+    })
+    return { h, label: hourLabel(h), v: n ? sum : null }
+  }).filter((p) => p.v != null)
+
+  const sum = (f) => rooms.reduce((s, r) => s + (f(r) || 0), 0)
+  const totalLatest = sum((r) => r.latest)
+  const totalAvg = sum((r) => r.avg)
+  const totalPeakRooms = sum((r) => r.peak)
+  const totalCap = rooms.reduce((s, r) => s + (r.cap || 0), 0)
+  const ratedTotal = totalCap * cos
+  const campusPeak = campusHourly.reduce((m, p) => (p.v > m.v ? p : m), campusHourly[0])
+  const campusValley = campusHourly.reduce((m, p) => (p.v < m.v ? p : m), campusHourly[0])
+
+  // 时段汇总（范围取该时段首末采样时刻，如 00:00–06:00）
+  const buckets = OV_BUCKETS.map((b) => {
+    const pts = campusHourly.filter((p) => b.hours.includes(p.h))
+    const vals = pts.map((p) => p.v)
+    const v = vals.length ? vals.reduce((s, x) => s + x, 0) / vals.length : 0
+    const range = `${hourLabel(b.hours[0])}–${hourLabel(b.hours[b.hours.length - 1])}`
+    return { key: b.key, label: b.label, range, v }
+  })
+  const peakBucket = buckets.reduce((m, b) => (b.v > m.v ? b : m), buckets[0])
+  const valleyBucket = buckets.reduce((m, b) => (b.v < m.v ? b : m), buckets[0])
+
+  const maxRoom = roomsSorted[0]
+  const minRoom = roomsSorted[roomsSorted.length - 1]
+  const tight = rooms.filter((r) => r.peakRate != null && r.peakRate >= 0.8)
+  const loose = rooms.filter((r) => r.peakRate != null && r.peakRate < 0.5)
+    .sort((a, b) => b.margin - a.margin)
+  const marginRooms = [...rooms].sort((a, b) => (b.peakRate ?? -1) - (a.peakRate ?? -1))
+
+  return {
+    date,
+    rooms,
+    roomsSorted,
+    roomsByNo,
+    campusHourly,
+    buckets,
+    peakBucket,
+    valleyBucket,
+    maxRoom,
+    minRoom,
+    tight,
+    loose,
+    marginRooms,
+    kpi: {
+      latest: totalLatest,
+      avg: totalAvg,
+      peak: campusPeak.v,
+      peakLabel: campusPeak.label,
+      valley: campusValley.v,
+      valleyLabel: campusValley.label,
+      gap: campusPeak.v - campusValley.v,
+      energy: (totalAvg * 24) / 1000,
+      roomCount: rooms.length,
+      totalCap,
+      ratedTotal,
+      avgRate: ratedTotal ? totalAvg / ratedTotal : null,
+      // 各房峰值合计（不同时出现，最保守的可调配裕度口径）
+      peakSum: totalPeakRooms,
+      marginPeak: ratedTotal ? ratedTotal - totalPeakRooms : null,
+      // 当日最新时刻运行点裕度
+      marginNow: ratedTotal ? ratedTotal - totalLatest : null,
+      // 全校同时刻峰值口径裕度
+      marginSimul: ratedTotal ? ratedTotal - campusPeak.v : null
+    }
+  }
+})
+
+// 单房时间分析：选中房间（失效时回退到当日负载最大的房间）
+const ovSelectedRoom = computed(() => {
+  const ov = overview.value
+  if (!ov) return null
+  return ov.rooms.find((r) => r.id === ovRoomId.value) || ov.maxRoom
+})
+// 日期/数据变化后，若选中房间已无数据则重置为当日最大负载房间
+watch(overview, (ov) => {
+  if (ov && (!ovRoomId.value || !ov.rooms.some((r) => r.id === ovRoomId.value))) {
+    ovRoomId.value = ov.maxRoom.id
+  }
+})
+
+const ovPct = (r) => (r == null ? '—' : `${(r * 100).toFixed(1)}%`)
+
+// 裕度调配建议（随统计结果自动生成）
+const ovAdvice = computed(() => {
+  const ov = overview.value
+  if (!ov || !ov.kpi.ratedTotal) return ''
+  const k = ov.kpi
+  const rate = k.marginPeak / k.ratedTotal
+  const head = `按各房当日峰值合计的保守口径，全校可调配裕度 ${fmt(k.marginPeak)} kW（占额定有功 ${ovPct(rate)}）`
+  if (ov.tight.length) {
+    const src = ov.loose.slice(0, 2).map((r) => `${r.name}（约 ${fmt(r.margin)} kW）`).join('、')
+    return `${head}；${ov.tight.map((r) => r.name).join('、')} 峰时负载率已超 80%，建议错峰或转供${src ? `，可优先分流至 ${src}` : ''}。`
+  }
+  const top = ov.loose[0]
+  return `${head}；各房峰时负载率均低于 80%，运行裕度充足${top ? `，${top.name} 可承接裕度最大（约 ${fmt(top.margin)} kW），可作为新增负荷优先接入点` : ''}。`
+})
+
+// ---------- 总览弹窗 ECharts 图表 ----------
+const PIE_COLORS = ['#00E5FF', '#3B82F6', '#7C5CFC', '#B45CFF', '#FF6B6B', '#FF9F43', '#FFD166', '#2ED573', '#1ABC9C', '#48DBFB', '#A3CB38', '#FF6FA5']
+const OV_TOOLTIP = {
+  backgroundColor: 'rgba(8, 22, 32, 0.95)',
+  borderColor: 'rgba(0, 212, 255, 0.4)',
+  borderWidth: 1,
+  textStyle: { color: '#dff6ff', fontSize: 12 },
+  extraCssText: 'box-shadow:0 6px 20px rgba(0,0,0,.45);border-radius:6px;'
+}
+const OV_AXIS_LABEL = { color: '#90b6c8', fontSize: 11 }
+const OV_SPLIT = { lineStyle: { color: 'rgba(0, 212, 255, 0.12)', type: 'dashed' } }
+const OV_BLUE_BAR = {
+  type: 'bar',
+  barWidth: 14,
+  itemStyle: {
+    borderRadius: [3, 3, 0, 0],
+    color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+      { offset: 0, color: '#46c8ff' },
+      { offset: 1, color: '#1d6fa5' }
+    ])
+  }
+}
+
+const ovChartEls = {
+  roomBar: null,
+  pie: null,
+  campusTime: null,
+  roomTime: null
+}
+const ovCharts = {}
+
+function disposeOvCharts() {
+  Object.keys(ovCharts).forEach((k) => {
+    ovCharts[k]?.dispose()
+    delete ovCharts[k]
+  })
+}
+function initOvCharts() {
+  Object.entries(ovChartEls).forEach(([key, el]) => {
+    const existed = ovCharts[key]
+    // v-if 重建后容器 DOM 会变化，旧实例需丢弃重建
+    if (existed && el && existed.getDom() !== el) {
+      existed.dispose()
+      delete ovCharts[key]
+    }
+    if (el && !ovCharts[key]) {
+      ovCharts[key] = echarts.init(el)
+      // 点击“各房负载对比”条形：联动下方单房时间分析
+      if (key === 'roomBar') {
+        ovCharts[key].on('click', (p) => {
+          if (p?.data?.id) {
+            ovRoomId.value = p.data.id
+            document.querySelector('.ov-card-roomtime')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+          }
+        })
+      }
+    }
+  })
+}
+function resizeOvCharts() {
+  Object.values(ovCharts).forEach((c) => c?.resize())
+}
+
+// 图1：各配电房当日平均负载（横向条形，从大到小；最大橙、最小绿）
+function renderRoomBarChart(ov) {
+  const c = ovCharts.roomBar
+  if (!c) return
+  // 类目轴自下而上排列：传入升序数据，使最大值显示在最上方
+  const cats = [...ov.roomsSorted].reverse()
+  const maxId = ov.maxRoom.id
+  const minId = ov.minRoom.id
+  c.setOption({
+    tooltip: {
+      ...OV_TOOLTIP,
+      trigger: 'item',
+      formatter: (p) => {
+        const r = cats[p.dataIndex]
+        return `<b>${r.name}</b><br/>当日均值 <b style="color:#7fe7ff">${fmt(r.avg)} kW</b>`
+          + `<br/>峰值 ${fmt(r.peak)} kW · 谷值 ${fmt(r.valley)} kW`
+          + `<br/>平均负载率 ${r.avgRate != null ? ovPct(r.avgRate) : '—'}`
+          + `<br/>可调配裕度 ${r.margin != null ? fmt(r.margin) + ' kW' : '—'}`
+          + `<br/><span style="color:#7fb6d2">点击柱子查看该房当天分时情况</span>`
+      }
+    },
+    grid: { left: 8, right: 58, top: 8, bottom: 8, containLabel: true },
+    xAxis: {
+      type: 'value',
+      name: 'kW',
+      nameTextStyle: { color: '#7fa6bd', fontSize: 10, padding: [0, 0, 0 - 20] },
+      axisLabel: OV_AXIS_LABEL,
+      splitLine: OV_SPLIT,
+      axisLine: { show: false },
+      axisTick: { show: false }
+    },
+    yAxis: {
+      type: 'category',
+      data: cats.map((r) => r.name),
+      axisLabel: { color: '#cfe9f4', fontSize: 11.5, width: 176, overflow: 'break', lineHeight: 14 },
+      axisLine: { lineStyle: { color: 'rgba(0,212,255,.25)' } },
+      axisTick: { show: false }
+    },
+    series: [{
+      ...OV_BLUE_BAR,
+      barWidth: 13,
+      label: {
+        show: true,
+        position: 'right',
+        color: '#cdeefb',
+        fontSize: 11,
+        formatter: (p) => fmt(p.value)
+      },
+      data: cats.map((r) => ({
+        id: r.id,
+        value: r.avg,
+        itemStyle: {
+          borderRadius: [0, 3, 3, 0],
+          color: r.id === maxId
+            ? new echarts.graphic.LinearGradient(0, 0, 1, 0, [{ offset: 0, color: '#ff9f6b' }, { offset: 1, color: '#ff6338' }])
+            : r.id === minId
+              ? new echarts.graphic.LinearGradient(0, 0, 1, 0, [{ offset: 0, color: '#5be8a0' }, { offset: 1, color: '#1faf66' }])
+              : new echarts.graphic.LinearGradient(0, 0, 1, 0, [{ offset: 0, color: '#3fb6ee' }, { offset: 1, color: '#1d6fa5' }])
+        }
+      }))
+    }]
+  }, true)
+}
+
+// 图2：各配电房负载占比（环形）
+function renderPieChart(ov) {
+  const c = ovCharts.pie
+  if (!c) return
+  const total = ov.roomsSorted.reduce((s, r) => s + r.avg, 0)
+  c.setOption({
+    color: PIE_COLORS,
+    tooltip: {
+      ...OV_TOOLTIP,
+      trigger: 'item',
+      formatter: (p) => `<b>${p.name}</b><br/>当日均值 <b style="color:${p.color}">${fmt(p.value)} kW</b><br/>占比 ${p.percent.toFixed(1)}%`
+    },
+    legend: {
+      type: 'scroll',
+      orient: 'vertical',
+      right: 4,
+      top: 'middle',
+      icon: 'roundRect',
+      itemWidth: 10,
+      itemHeight: 10,
+      itemGap: 9,
+      textStyle: { color: '#9dbfce', fontSize: 11 },
+      width: 168,
+      formatter: (name) => (name.length > 14 ? `${name.slice(0, 14)}…` : name),
+      pageTextStyle: { color: '#9dbfce' },
+      pageIconColor: '#46c8ff',
+      pageIconInactiveColor: 'rgba(127,166,192,.3)'
+    },
+    // 中心文字：以圆环圆心为锚点整体居中（title 块含主数值+副标题，垂直居中）
+    title: {
+      text: fmt(total),
+      subtext: 'kW 当日总均值',
+      left: '30%',
+      top: 'middle',
+      textAlign: 'center',
+      itemGap: 5,
+      padding: 0,
+      textStyle: { color: '#eafaff', fontSize: 24, fontWeight: 700, fontFamily: 'sans-serif' },
+      subtextStyle: { color: '#8fb4c6', fontSize: 11, fontFamily: 'sans-serif' }
+    },
+    series: [{
+      type: 'pie',
+      radius: ['48%', '74%'],
+      center: ['30%', '50%'],
+      avoidLabelOverlap: true,
+      padAngle: 1.2,
+      itemStyle: { borderColor: 'rgba(7,16,24,.9)', borderWidth: 1.5, borderRadius: 3 },
+      label: {
+        color: '#cdeefb',
+        fontSize: 10.5,
+        formatter: '{d}%'
+      },
+      labelLine: { length: 8, length2: 8, lineStyle: { color: 'rgba(0,212,255,.35)' } },
+      emphasis: { scaleSize: 5, label: { fontSize: 12, fontWeight: 700 } },
+      data: ov.roomsSorted.map((r, i) => ({
+        name: r.name,
+        value: r.avg,
+        itemStyle: { color: PIE_COLORS[i % PIE_COLORS.length] }
+      }))
+    }]
+  }, true)
+}
+
+// 图3：校区总功率 · 当天分时
+function renderCampusTimeChart(ov) {
+  const c = ovCharts.campusTime
+  if (!c) return
+  const pts = ov.campusHourly
+  const peakV = ov.kpi.peak
+  const valleyV = ov.kpi.valley
+  c.setOption({
+    tooltip: {
+      ...OV_TOOLTIP,
+      trigger: 'axis',
+      axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(0,212,255,.06)' } },
+      formatter: (ps) => {
+        const p = ps[0]
+        const tag = p.value === peakV ? ' <span style="color:#ff9f6b">● 全天高峰</span>'
+          : p.value === valleyV ? ' <span style="color:#5be8a0">● 全天低谷</span>' : ''
+        return `${p.axisValue}<br/>校区总功率 <b style="color:#7fe7ff">${fmt(p.value)} kW</b>${tag}`
+      }
+    },
+    grid: { left: 10, right: 20, top: 26, bottom: 10, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: pts.map((p) => p.label),
+      axisLabel: OV_AXIS_LABEL,
+      axisLine: { lineStyle: { color: 'rgba(0,212,255,.25)' } },
+      axisTick: { show: false }
+    },
+    yAxis: {
+      type: 'value',
+      name: 'kW',
+      nameTextStyle: { color: '#7fa6bd', fontSize: 10 },
+      axisLabel: OV_AXIS_LABEL,
+      splitLine: OV_SPLIT,
+      axisLine: { show: false }
+    },
+    series: [{
+      ...OV_BLUE_BAR,
+      barWidth: '52%',
+      label: {
+        show: true,
+        position: 'top',
+        color: '#cdeefb',
+        fontSize: 10.5,
+        formatter: (p) => fmt(p.value)
+      },
+      markLine: {
+        silent: true,
+        symbol: 'none',
+        data: [{
+          yAxis: ov.kpi.avg,
+          label: { formatter: `日均 ${fmt(ov.kpi.avg)}`, color: '#ffd166', fontSize: 10.5, position: 'insideEndTop' },
+          lineStyle: { color: '#ffd166', type: 'dashed', width: 1.2 }
+        }]
+      },
+      data: pts.map((p) => ({
+        value: p.v,
+        itemStyle: {
+          borderRadius: [3, 3, 0, 0],
+          color: p.v === peakV
+            ? new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: '#ff9f6b' }, { offset: 1, color: '#e0551f' }])
+            : p.v === valleyV
+              ? new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: '#5be8a0' }, { offset: 1, color: '#17925a' }])
+              : undefined
+        }
+      }))
+    }]
+  }, true)
+}
+
+// 图4：单个配电房 · 当天分时
+function renderRoomTimeChart(room) {
+  const c = ovCharts.roomTime
+  if (!c || !room) return
+  const pts = room.hourly
+  c.setOption({
+    tooltip: {
+      ...OV_TOOLTIP,
+      trigger: 'axis',
+      axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(0,212,255,.06)' } },
+      formatter: (ps) => {
+        const p = ps[0]
+        const d = pts[p.dataIndex]
+        const tag = d.v === room.peak ? ' <span style="color:#ff9f6b">● 当日高峰</span>'
+          : d.v === room.valley ? ' <span style="color:#5be8a0">● 当日低谷</span>' : ''
+        return `${p.axisValue}<br/>有功功率 <b style="color:#7fe7ff">${fmt(d.v)} kW</b>`
+          + (d.rate != null ? `<br/>变压器负载率 ${ovPct(d.rate)}` : '') + tag
+      }
+    },
+    grid: { left: 10, right: 20, top: 26, bottom: 10, containLabel: true },
+    xAxis: {
+      type: 'category',
+      data: pts.map((p) => p.label),
+      axisLabel: OV_AXIS_LABEL,
+      axisLine: { lineStyle: { color: 'rgba(0,212,255,.25)' } },
+      axisTick: { show: false }
+    },
+    yAxis: {
+      type: 'value',
+      name: 'kW',
+      nameTextStyle: { color: '#7fa6bd', fontSize: 10 },
+      axisLabel: OV_AXIS_LABEL,
+      splitLine: OV_SPLIT,
+      axisLine: { show: false }
+    },
+    series: [{
+      ...OV_BLUE_BAR,
+      barWidth: '52%',
+      label: {
+        show: true,
+        position: 'top',
+        color: '#cdeefb',
+        fontSize: 10.5,
+        formatter: (p) => fmt(p.value)
+      },
+      markLine: {
+        silent: true,
+        symbol: 'none',
+        data: [{
+          yAxis: room.avg,
+          label: { formatter: `日均 ${fmt(room.avg)}`, color: '#ffd166', fontSize: 10.5, position: 'insideEndTop' },
+          lineStyle: { color: '#ffd166', type: 'dashed', width: 1.2 }
+        }]
+      },
+      data: pts.map((p) => ({
+        value: p.v,
+        itemStyle: {
+          borderRadius: [3, 3, 0, 0],
+          color: p.v === room.peak
+            ? new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: '#ff9f6b' }, { offset: 1, color: '#e0551f' }])
+            : p.v === room.valley
+              ? new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: '#5be8a0' }, { offset: 1, color: '#17925a' }])
+              : undefined
+        }
+      }))
+    }]
+  }, true)
+}
+
+function renderOvCharts() {
+  const ov = overview.value
+  if (!ov) return
+  renderRoomBarChart(ov)
+  renderPieChart(ov)
+  renderCampusTimeChart(ov)
+  renderRoomTimeChart(ovSelectedRoom.value)
+}
+
+watch(showOverview, async (v) => {
+  if (v) {
+    await nextTick()
+    initOvCharts()
+    renderOvCharts()
+    resizeOvCharts()
+  } else {
+    disposeOvCharts()
+  }
+})
+watch([overview, ovRoomId], () => {
+  if (showOverview.value) nextTick(() => { initOvCharts(); renderOvCharts() })
+})
 
 // ---------- 选中楼宇与功率总览 ----------
 const selected = ref(null)
@@ -537,13 +1127,16 @@ const worldStyle = computed(() => ({
   transform: `translate(-50%, -50%) translate(${tx.value}px, ${ty.value}px) scale(${scale.value})`
 }))
 
-// Topo 按钮对齐底图实际渲染边缘（contain 居中，两侧可能有黑边）
-const TOPO_GAP = 16
+// Topo 按钮对齐底图“当前实际渲染”的左/上边缘（计入缩放与平移；放大覆盖舞台时贴舞台边）
+const TOPO_TOP_GAP = 16
 const topoStyle = computed(() => {
   if (stage.w <= 900) return { right: '12px', top: '14px' }
-  const edgeLeft = Math.max(0, (stage.w - base.w) / 2) + TOPO_GAP
-  const edgeTop = Math.max(0, (stage.h - base.h) / 2) + TOPO_GAP
-  return { left: `${edgeLeft}px`, top: `${edgeTop}px` }
+  const edgeLeft = stage.w / 2 - (base.w * scale.value) / 2 + tx.value
+  const edgeTop = stage.h / 2 - (base.h * scale.value) / 2 + ty.value
+  return {
+    left: `${Math.max(0, edgeLeft)}px`,
+    top: `${Math.max(0, edgeTop) + TOPO_TOP_GAP}px`
+  }
 })
 
 function recalcBase() {
@@ -618,7 +1211,8 @@ function onImgLoad() {
 let ro = null
 function onKey(e) {
   if (e.key !== 'Escape') return
-  if (showTopo.value) closeTopo()
+  if (showOverview.value) closeOverview()
+  else if (showTopo.value) closeTopo()
   else if (showDelete.value) cancelDelete()
   else if (showCreate.value) cancelCreate()
   else closePanel()
@@ -630,11 +1224,13 @@ onMounted(() => {
   ro.observe(stageEl.value)
   stageEl.value.addEventListener('wheel', onWheel, { passive: false })
   window.addEventListener('keydown', onKey)
+  window.addEventListener('resize', resizeOvCharts)
   loadStored()
 })
 onBeforeUnmount(() => {
   ro?.disconnect()
   clearLpTimer()
+  disposeOvCharts()
   // 有待写入的数据时，关闭页面也尽量落盘
   if (useMockFile && saveTimer && navigator.sendBeacon) {
     const payload = JSON.stringify({ rooms: customRooms.value, removedIds: removedIds.value })
@@ -643,6 +1239,7 @@ onBeforeUnmount(() => {
   clearTimeout(saveTimer)
   stageEl.value?.removeEventListener('wheel', onWheel)
   window.removeEventListener('keydown', onKey)
+  window.removeEventListener('resize', resizeOvCharts)
 })
 </script>
 
@@ -732,26 +1329,45 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <!-- 10kV 中心站主接线 Topo 入口（红线标注位置） -->
-    <button class="topo-entry" type="button" :style="topoStyle" @click="openTopo">
-      <span class="topo-entry-icon" aria-hidden="true">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="5" cy="6" r="2.2"/>
-          <circle cx="5" cy="18" r="2.2"/>
-          <circle cx="13" cy="12" r="2.2"/>
-          <circle cx="19.5" cy="7" r="1.8"/>
-          <circle cx="19.5" cy="17" r="1.8"/>
-          <path d="M7.2 6.6L11 11M7.2 17.4L11 13M15.1 11l2.7-3M15.1 13l2.7 3"/>
+    <!-- 左上功能入口（对齐底图实际渲染边缘） -->
+    <div class="plan-entries" :style="topoStyle">
+      <!-- 10kV 中心站主接线 Topo 入口 -->
+      <button class="topo-entry" type="button" @click="openTopo">
+        <span class="topo-entry-icon" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="5" cy="6" r="2.2"/>
+            <circle cx="5" cy="18" r="2.2"/>
+            <circle cx="13" cy="12" r="2.2"/>
+            <circle cx="19.5" cy="7" r="1.8"/>
+            <circle cx="19.5" cy="17" r="1.8"/>
+            <path d="M7.2 6.6L11 11M7.2 17.4L11 13M15.1 11l2.7-3M15.1 13l2.7 3"/>
+          </svg>
+        </span>
+        <span class="topo-entry-text">
+          <b>10kV 中心站主接线 Topo</b>
+          <i>进入配网仿真系统</i>
+        </span>
+        <svg class="topo-entry-arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M9 5l7 7-7 7"/>
         </svg>
-      </span>
-      <span class="topo-entry-text">
-        <b>10kV 中心站主接线 Topo</b>
-        <i>进入配网仿真系统</i>
-      </span>
-      <svg class="topo-entry-arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M9 5l7 7-7 7"/>
-      </svg>
-    </button>
+      </button>
+
+      <!-- 配电房用电负载总览入口 -->
+      <button class="ov-entry" type="button" @click="openOverview">
+        <span class="ov-entry-icon" aria-hidden="true">
+          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 20V11"/><path d="M10 20V4"/><path d="M16 20v-7"/><path d="M22 20H2"/>
+          </svg>
+        </span>
+        <span class="ov-entry-text">
+          <b>配电房用电负载总览</b>
+          <i>全校总负载 · 峰谷时段 · 裕度调配</i>
+        </span>
+        <svg class="ov-entry-arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M9 5l7 7-7 7"/>
+        </svg>
+      </button>
+    </div>
 
     <!-- 缩放控件 -->
     <div class="plan-zoom">
@@ -846,7 +1462,7 @@ onBeforeUnmount(() => {
         <!-- 三段统计 -->
         <div class="pp-stat-grid">
           <div class="pp-stat">
-            <p class="pp-stat-label">今日均值<template v-if="isReal"><i class="pp-stat-date">（{{ anchorStr }}）</i></template></p>
+            <p class="pp-stat-label">当日均值<template v-if="isReal"><i class="pp-stat-date">（{{ anchorStr }}）</i></template></p>
             <p class="pp-stat-value">{{ fmt(summary.today.avg) }} <i>kW</i></p>
             <p class="pp-stat-rows">
               <span>当前 <b>{{ fmt(summary.today.current) }}</b></span>
@@ -982,6 +1598,248 @@ onBeforeUnmount(() => {
               allow="fullscreen"
               @load="topoLoading = false"
             ></iframe>
+          </div>
+        </div>
+      </div>
+    </transition>
+
+    <!-- 配电房用电负载总览弹窗 -->
+    <transition name="ov-fade">
+      <div v-if="showOverview" class="ov-mask" @click.self="closeOverview">
+        <div class="ov-modal" role="dialog" aria-modal="true" aria-label="配电房用电负载总览">
+          <header class="ov-head">
+            <span class="ov-head-icon" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 20V11"/><path d="M10 20V4"/><path d="M16 20v-7"/><path d="M22 20H2"/>
+              </svg>
+            </span>
+            <div class="ov-head-text">
+              <h3>配电房用电负载总览</h3>
+              <p>江宁校区 · 10kV 中心站 · 多维度负载统计与裕度调配分析</p>
+            </div>
+            <label class="ov-date-pick">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="4.5" width="18" height="16" rx="2"/><path d="M3 9h18M8 3v3M16 3v3"/>
+              </svg>
+              <input
+                v-model="ovDate"
+                type="date"
+                :min="ovBounds.min"
+                :max="ovBounds.max"
+                aria-label="选择查询日期"
+              >
+            </label>
+            <button class="ov-close" type="button" aria-label="关闭总览" @click="closeOverview">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
+          </header>
+
+          <div v-if="overview" class="ov-body">
+            <!-- 校区总览 KPI -->
+            <section class="ov-kpis">
+              <div class="ov-kpi">
+                <p class="ov-kpi-label">当日最新时刻总功率</p>
+                <p class="ov-kpi-value">{{ fmt(overview.kpi.latest) }} <i>kW</i></p>
+                <p class="ov-kpi-sub">全校日均 {{ fmt(overview.kpi.avg) }} kW</p>
+              </div>
+              <div class="ov-kpi is-peak">
+                <p class="ov-kpi-label">当日同时刻峰值</p>
+                <p class="ov-kpi-value">{{ fmt(overview.kpi.peak) }} <i>kW</i></p>
+                <p class="ov-kpi-sub">高峰时刻 {{ overview.kpi.peakLabel }}</p>
+              </div>
+              <div class="ov-kpi is-valley">
+                <p class="ov-kpi-label">当日低谷</p>
+                <p class="ov-kpi-value">{{ fmt(overview.kpi.valley) }} <i>kW</i></p>
+                <p class="ov-kpi-sub">低谷时刻 {{ overview.kpi.valleyLabel }} · 峰谷差 {{ fmt(overview.kpi.gap) }} kW</p>
+              </div>
+              <div class="ov-kpi">
+                <p class="ov-kpi-label">当日总用电量</p>
+                <p class="ov-kpi-value">{{ overview.kpi.energy.toFixed(1) }} <i>MWh</i></p>
+                <p class="ov-kpi-sub">按各房日均功率折算</p>
+              </div>
+              <div class="ov-kpi">
+                <p class="ov-kpi-label">平均负载率</p>
+                <p class="ov-kpi-value">{{ ovPct(overview.kpi.avgRate) }}</p>
+                <p class="ov-kpi-sub">总额定容量 {{ fmt(overview.kpi.totalCap) }} kVA</p>
+              </div>
+              <div class="ov-kpi">
+                <p class="ov-kpi-label">在统配电房</p>
+                <p class="ov-kpi-value">{{ overview.kpi.roomCount }} <i>座</i></p>
+                <p class="ov-kpi-sub">重载 {{ overview.tight.length }} 座 · 裕度充裕 {{ overview.loose.length }} 座</p>
+              </div>
+            </section>
+
+            <!-- 各房负载对比 + 占比 -->
+            <section class="ov-grid">
+              <div class="ov-card ov-card-bars">
+                <div class="ov-card-head">
+                  <h4>各配电房当日平均负载对比（从高到低）</h4>
+                  <span class="ov-card-tags">
+                    <i class="tag-max">最高</i>
+                    <i class="tag-min">最低</i>
+                  </span>
+                </div>
+                <p class="ov-bar-callout">
+                  当日负载最大：<b class="c-max">{{ overview.maxRoom.name }}</b>（{{ fmt(overview.maxRoom.avg) }} kW，占全校 {{ (overview.maxRoom.avg / overview.kpi.avg * 100).toFixed(1) }}%）
+                  <span class="ov-callout-sep">·</span>
+                  负载最小：<b class="c-min">{{ overview.minRoom.name }}</b>（{{ fmt(overview.minRoom.avg) }} kW）
+                  <span class="ov-callout-sep">·</span>
+                  <span class="ov-click-hint">点击柱子可联动查看该房分时曲线</span>
+                </p>
+                <div :ref="(el) => (ovChartEls.roomBar = el)" class="ov-chart ov-chart-bar" role="img" aria-label="各配电房当日平均负载条形图"></div>
+              </div>
+
+              <div class="ov-card ov-card-pie">
+                <div class="ov-card-head">
+                  <h4>各配电房负载占比</h4>
+                  <span class="ov-card-sub">当日均值口径</span>
+                </div>
+                <div :ref="(el) => (ovChartEls.pie = el)" class="ov-chart ov-chart-pie" role="img" aria-label="各配电房负载占比环形图"></div>
+              </div>
+            </section>
+
+            <!-- 时间维度分析：全校 -->
+            <section class="ov-card ov-card-time">
+              <div class="ov-card-head">
+                <h4>校区总功率 · 时间维度分析</h4>
+                <div class="ov-buckets">
+                  <span
+                    v-for="b in overview.buckets"
+                    :key="b.key"
+                    class="ov-bucket"
+                    :class="{ 'is-peak': b.key === overview.peakBucket.key, 'is-valley': b.key === overview.valleyBucket.key }"
+                    :title="`${b.label} ${b.range}`"
+                  >
+                    <label>{{ b.label }}<small>{{ b.range }}</small></label>
+                    <b>{{ fmt(b.v) }} kW</b>
+                  </span>
+                </div>
+              </div>
+              <p class="ov-time-note">
+                时段维度：<b class="c-max">{{ overview.peakBucket.label }}（{{ overview.peakBucket.range }}）</b>用电负载最大（均 {{ fmt(overview.peakBucket.v) }} kW），
+                <b class="c-min">{{ overview.valleyBucket.label }}（{{ overview.valleyBucket.range }}）</b>负载最小（均 {{ fmt(overview.valleyBucket.v) }} kW）
+                <span class="ov-callout-sep">·</span>
+                全天峰谷差 {{ fmt(overview.kpi.gap) }} kW，低谷时段适合安排大功率设备检修与储能充电
+              </p>
+              <div :ref="(el) => (ovChartEls.campusTime = el)" class="ov-chart ov-chart-time" role="img" aria-label="校区总功率当天分时柱状图"></div>
+            </section>
+
+            <!-- 时间维度分析：单个配电房 -->
+            <section v-if="ovSelectedRoom" class="ov-card ov-card-roomtime">
+              <div class="ov-card-head">
+                <h4>各配电房总功率 · 时间维度分析</h4>
+                <label class="ov-room-pick">
+                  <span>选择配电房</span>
+                  <select v-model="ovRoomId" aria-label="选择配电房">
+                    <option v-for="r in overview.roomsByNo" :key="r.id" :value="r.id">{{ r.name }}</option>
+                  </select>
+                </label>
+              </div>
+              <p class="ov-time-note">
+                <b>{{ ovSelectedRoom.name }}</b> 当日：
+                高峰 <b class="c-max">{{ ovSelectedRoom.hourly.find((p) => p.v === ovSelectedRoom.peak)?.label }}</b>
+                {{ fmt(ovSelectedRoom.peak) }} kW
+                <span class="ov-callout-sep">·</span>
+                低谷 <b class="c-min">{{ ovSelectedRoom.hourly.find((p) => p.v === ovSelectedRoom.valley)?.label }}</b>
+                {{ fmt(ovSelectedRoom.valley) }} kW
+                <span class="ov-callout-sep">·</span>
+                峰谷差 {{ fmt(ovSelectedRoom.peak - ovSelectedRoom.valley) }} kW
+                <span class="ov-callout-sep">·</span>
+                日均 {{ fmt(ovSelectedRoom.avg) }} kW
+                <span class="ov-callout-sep">·</span>
+                峰值负载率 <b :class="'c-' + (ovSelectedRoom.peakRate >= 0.8 ? 'max' : 'min')">{{ ovPct(ovSelectedRoom.peakRate) }}</b>
+              </p>
+              <div :ref="(el) => (ovChartEls.roomTime = el)" class="ov-chart ov-chart-roomtime" role="img" :aria-label="`${ovSelectedRoom.name}当天分时柱状图`"></div>
+            </section>
+
+            <!-- 可调配裕度分析（重点） -->
+            <section class="ov-card ov-card-margin">
+              <div class="ov-card-head">
+                <h4>可调配裕度分析 <em class="ov-hot">重点</em></h4>
+                <span class="ov-card-sub">额定有功 = 容量 × cosφ（{{ HV_INFO.cosPhi }}）</span>
+              </div>
+
+              <div class="ov-margin-kpis">
+                <div class="ov-mk">
+                  <p>总额定容量</p>
+                  <b>{{ fmt(overview.kpi.totalCap) }} <i>kVA</i></b>
+                  <span>额定有功 {{ fmt(overview.kpi.ratedTotal) }} kW</span>
+                </div>
+                <div class="ov-mk">
+                  <p>各房峰值功率合计</p>
+                  <b>{{ fmt(overview.kpi.peakSum) }} <i>kW</i></b>
+                  <span>最保守负载口径</span>
+                </div>
+                <div class="ov-mk is-hot">
+                  <p>峰时可调配裕度</p>
+                  <b :class="{ 'is-neg': overview.kpi.marginPeak < 0 }">{{ fmt(overview.kpi.marginPeak) }} <i>kW</i></b>
+                  <span>占额定有功 {{ ovPct(overview.kpi.marginPeak / overview.kpi.ratedTotal) }}</span>
+                </div>
+                <div class="ov-mk">
+                  <p>最新时刻可调配裕度</p>
+                  <b>{{ fmt(overview.kpi.marginNow) }} <i>kW</i></b>
+                  <span>按当日最新采样点估算</span>
+                </div>
+                <div class="ov-mk">
+                  <p>同时刻峰值裕度</p>
+                  <b>{{ fmt(overview.kpi.marginSimul) }} <i>kW</i></b>
+                  <span>全校峰刻 {{ overview.kpi.peakLabel }}</span>
+                </div>
+              </div>
+
+              <p class="ov-advice">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z"/>
+                </svg>
+                {{ ovAdvice }}
+              </p>
+
+              <div class="ov-mr">
+                <div class="ov-mr-head">
+                  <span>配电房</span>
+                  <span>峰值负载率</span>
+                  <span class="ov-mr-th-track">峰值功率（kW）· 装机容量（kVA）<i class="ov-tick80-label">80% 经济上限</i></span>
+                  <span>可调配裕度</span>
+                </div>
+                <div v-for="r in overview.marginRooms" :key="r.id" class="ov-mr-row">
+                  <span class="ov-mr-name">
+                    <i class="ov-mr-dot" :class="'is-' + marginStatus(r.peakRate).cls"></i>
+                    {{ r.name }}
+                    <em :class="'tag-' + marginStatus(r.peakRate).cls">{{ marginStatus(r.peakRate).label }}</em>
+                  </span>
+                  <span class="ov-mr-rate" :class="'is-' + marginStatus(r.peakRate).cls">{{ ovPct(r.peakRate) }}</span>
+                  <span class="ov-mr-track-wrap">
+                    <span class="ov-mr-track">
+                      <i
+                        class="ov-mr-load"
+                        :class="'is-' + marginStatus(r.peakRate).cls"
+                        :style="{ width: Math.min(100, (r.peakRate || 0) * 100).toFixed(1) + '%' }"
+                      ></i>
+                      <i class="ov-tick80"></i>
+                    </span>
+                    <small v-if="r.cap">{{ fmt(r.peak) }} kW · {{ fmt(r.cap) }} kVA</small>
+                    <small v-else>容量待录入</small>
+                  </span>
+                  <span class="ov-mr-margin">
+                    <template v-if="r.margin != null"><b>{{ fmt(r.margin) }}</b> kW</template>
+                    <i v-else>—</i>
+                  </span>
+                </div>
+              </div>
+              <p class="ov-footnote">
+                注：可调配裕度＝额定有功 − 当日峰值功率，为可新增/转供负载的保守估算；实际调配还需校验馈线载流量与 N-1 校验。
+                峰值负载率按 P/(S×cosφ) 估算，与实测面板中变压器直采负载率口径略有差异。
+              </p>
+            </section>
+          </div>
+
+          <!-- 所选日期无有效数据 -->
+          <div v-else class="ov-empty">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
+            </svg>
+            <p>{{ ovDate }} 暂无配电房实测数据</p>
+            <span v-if="ovBounds.min">可选区间：{{ ovBounds.min }} ～ {{ ovBounds.max }}</span>
           </div>
         </div>
       </div>
@@ -1342,70 +2200,97 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 26px rgba(0, 229, 255, 0.5);
 }
 
-/* ---------- 10kV 中心站主接线 Topo 入口 ---------- */
+/* ---------- 10kV 中心站主接线 Topo 入口（内嵌地图的玻璃 HUD 风） ---------- */
 .topo-entry {
-  position: absolute;
+  position: relative;
   z-index: 60;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 14px 9px 11px;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 12px 7px 11px;
   font-family: var(--font);
   text-align: left;
-  color: #cdeefb;
+  color: #bfe6f5;
   cursor: pointer;
-  background: linear-gradient(135deg, rgba(10, 32, 54, 0.92), rgba(6, 20, 34, 0.92));
-  border: 1.5px solid rgba(0, 212, 255, 0.55);
-  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(8, 24, 38, 0.44), rgba(5, 14, 24, 0.44));
+  border: 1px solid rgba(56, 217, 245, 0.22);
+  border-radius: 7px;
   box-shadow:
-    0 10px 26px rgba(3, 10, 18, 0.5),
-    0 0 20px rgba(0, 150, 220, 0.28),
-    inset 0 0 14px rgba(0, 50, 80, 0.35);
-  backdrop-filter: blur(8px);
-  transition: transform 0.16s, border-color 0.16s, box-shadow 0.16s;
-  animation: topoBtnGlow 2.8s ease-in-out infinite;
+    0 4px 14px rgba(2, 8, 14, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    inset 0 0 18px rgba(0, 90, 120, 0.1);
+  backdrop-filter: blur(9px) saturate(1.1);
+  -webkit-backdrop-filter: blur(9px) saturate(1.1);
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
 }
-@keyframes topoBtnGlow {
-  0%, 100% { box-shadow: 0 10px 26px rgba(3, 10, 18, 0.5), 0 0 18px rgba(0, 150, 220, 0.25), inset 0 0 14px rgba(0, 50, 80, 0.35); }
-  50% { box-shadow: 0 10px 26px rgba(3, 10, 18, 0.5), 0 0 34px rgba(0, 212, 255, 0.5), inset 0 0 18px rgba(0, 70, 110, 0.45); }
+/* 左侧内嵌标识条 */
+.topo-entry::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 2.5px;
+  border-radius: 0 2px 2px 0;
+  background: linear-gradient(180deg, rgba(56, 217, 245, 0.85), rgba(0, 153, 204, 0.55));
+  opacity: 0.65;
+  transition: opacity 0.18s ease;
 }
 .topo-entry:hover {
-  transform: translateY(-2px);
-  color: #eafaff;
-  border-color: rgba(0, 229, 255, 0.95);
+  transform: translateY(-1px);
+  color: #dff6ff;
+  border-color: rgba(56, 217, 245, 0.5);
+  background: linear-gradient(135deg, rgba(10, 30, 46, 0.58), rgba(6, 18, 30, 0.58));
+  box-shadow:
+    0 6px 18px rgba(2, 8, 14, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 0 18px rgba(0, 180, 220, 0.16);
 }
+.topo-entry:hover::before { opacity: 1; }
 .topo-entry-icon {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  width: 26px;
+  height: 26px;
   flex: none;
-  border-radius: 7px;
-  color: #001a2e;
-  background: linear-gradient(135deg, #00e5ff, #0099cc);
-  box-shadow: 0 0 14px rgba(0, 229, 255, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.3);
+  border-radius: 6px;
+  color: #57ddf8;
+  background: rgba(56, 217, 245, 0.1);
+  border: 1px solid rgba(56, 217, 245, 0.28);
+  box-shadow: inset 0 0 10px rgba(56, 217, 245, 0.12);
+  transition: background 0.18s ease, border-color 0.18s ease;
 }
-.topo-entry-text { display: flex; flex-direction: column; gap: 2px; line-height: 1.25; }
+.topo-entry-icon svg { width: 15px; height: 15px; }
+.topo-entry:hover .topo-entry-icon {
+  background: rgba(56, 217, 245, 0.18);
+  border-color: rgba(56, 217, 245, 0.5);
+}
+.topo-entry-text { display: flex; flex-direction: column; gap: 1px; line-height: 1.25; }
 .topo-entry-text b {
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  color: #eafaff;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: rgba(234, 250, 255, 0.92);
   white-space: nowrap;
 }
 .topo-entry-text i {
   font-style: normal;
-  font-size: 10.5px;
-  letter-spacing: 0.08em;
-  color: #7fb6d2;
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  color: rgba(127, 182, 210, 0.85);
+  white-space: nowrap;
 }
 .topo-entry-arrow {
   flex: none;
-  color: #00d4ff;
-  transition: transform 0.16s;
+  width: 12px;
+  height: 12px;
+  margin-left: auto;
+  color: rgba(56, 217, 245, 0.6);
+  transition: transform 0.18s ease, color 0.18s ease;
 }
-.topo-entry:hover .topo-entry-arrow { transform: translateX(3px); }
+.topo-entry:hover .topo-entry-arrow { transform: translateX(3px); color: #7fe7ff; }
 
 /* ---------- 配网仿真系统弹窗 ---------- */
 .topo-mask {
@@ -2246,8 +3131,6 @@ onBeforeUnmount(() => {
   gap: 13px;
   padding: 16px 15px 6px;
 }
-.rf-row { display: flex; gap: 12px; }
-.rf-row .rf-item { flex: 1; }
 /* 四台变压器容量：2 × 2 网格 */
 .rf-grid4 {
   display: grid;
@@ -2422,6 +3305,658 @@ onBeforeUnmount(() => {
 .room-fade-enter-from .del-modal,
 .room-fade-leave-to .del-modal { transform: translateY(14px) scale(0.97); opacity: 0; }
 
+/* ---------- 左上功能入口容器 ---------- */
+.plan-entries {
+  position: absolute;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+/* ---------- 配电房用电负载总览入口（内嵌地图的玻璃 HUD 风） ---------- */
+.ov-entry {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 12px 7px 11px;
+  font-family: var(--font);
+  text-align: left;
+  color: #bfe6d6;
+  cursor: pointer;
+  background: linear-gradient(135deg, rgba(8, 30, 26, 0.44), rgba(5, 16, 16, 0.44));
+  border: 1px solid rgba(79, 224, 162, 0.22);
+  border-radius: 7px;
+  box-shadow:
+    0 4px 14px rgba(2, 10, 8, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    inset 0 0 18px rgba(0, 90, 66, 0.1);
+  backdrop-filter: blur(9px) saturate(1.1);
+  -webkit-backdrop-filter: blur(9px) saturate(1.1);
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+}
+/* 左侧内嵌标识条 */
+.ov-entry::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 2.5px;
+  border-radius: 0 2px 2px 0;
+  background: linear-gradient(180deg, rgba(79, 224, 162, 0.85), rgba(31, 175, 111, 0.55));
+  opacity: 0.65;
+  transition: opacity 0.18s ease;
+}
+.ov-entry:hover {
+  transform: translateY(-1px);
+  color: #dffbed;
+  border-color: rgba(79, 224, 162, 0.5);
+  background: linear-gradient(135deg, rgba(10, 38, 32, 0.58), rgba(6, 20, 20, 0.58));
+  box-shadow:
+    0 6px 18px rgba(2, 10, 8, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 0 18px rgba(46, 213, 115, 0.15);
+}
+.ov-entry:hover::before { opacity: 1; }
+.ov-entry-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: 6px;
+  color: #5cebb2;
+  background: rgba(79, 224, 162, 0.1);
+  border: 1px solid rgba(79, 224, 162, 0.28);
+  box-shadow: inset 0 0 10px rgba(79, 224, 162, 0.12);
+  transition: background 0.18s ease, border-color 0.18s ease;
+}
+.ov-entry-icon svg { width: 15px; height: 15px; }
+.ov-entry:hover .ov-entry-icon {
+  background: rgba(79, 224, 162, 0.18);
+  border-color: rgba(79, 224, 162, 0.5);
+}
+.ov-entry-text { display: flex; flex-direction: column; gap: 1px; line-height: 1.25; }
+.ov-entry-text b {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: rgba(234, 255, 246, 0.92);
+  white-space: nowrap;
+}
+.ov-entry-text i {
+  font-style: normal;
+  font-size: 9.5px;
+  letter-spacing: 0.05em;
+  color: rgba(127, 200, 174, 0.85);
+  white-space: nowrap;
+}
+.ov-entry-arrow {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-left: auto;
+  color: rgba(79, 224, 162, 0.6);
+  transition: transform 0.18s ease, color 0.18s ease;
+}
+.ov-entry:hover .ov-entry-arrow { transform: translateX(3px); color: #8ff5c8; }
+
+/* ---------- 配电房用电负载总览弹窗 ---------- */
+.ov-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 320;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 26px 32px;
+  background: rgba(3, 9, 16, 0.74);
+  backdrop-filter: blur(4px);
+}
+.ov-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(1240px, 100%);
+  max-height: 94%;
+  overflow: hidden;
+  background: linear-gradient(170deg, #0d2030, #071018);
+  border: 1.5px solid rgba(46, 213, 130, 0.5);
+  border-radius: 12px;
+  box-shadow:
+    0 30px 80px rgba(0, 0, 0, 0.65),
+    0 0 46px rgba(30, 160, 100, 0.22),
+    inset 0 0 34px rgba(0, 30, 30, 0.45);
+}
+.ov-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 11px 14px;
+  border-bottom: 1px solid rgba(46, 213, 115, 0.28);
+  background: linear-gradient(90deg, rgba(16, 90, 70, 0.32), rgba(6, 20, 28, 0.6));
+}
+.ov-head-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: 7px;
+  color: #48e8a0;
+  background: rgba(46, 213, 115, 0.1);
+  border: 1px solid rgba(46, 213, 115, 0.45);
+  box-shadow: 0 0 12px rgba(46, 213, 115, 0.22);
+}
+.ov-head-text { flex: 1; min-width: 0; }
+.ov-head-text h3 {
+  font-size: 14.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #eafff6;
+}
+.ov-head-text p {
+  margin-top: 1px;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  color: #79b9a4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ov-date-pick {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  letter-spacing: 0.05em;
+  color: #8fd8f7;
+  border: 1px solid rgba(0, 212, 255, 0.35);
+  border-radius: 7px;
+  background: rgba(0, 60, 90, 0.25);
+  cursor: pointer;
+}
+.ov-date-pick input {
+  width: 122px;
+  padding: 0;
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  color: #dff6ff;
+  background: transparent;
+  border: none;
+  outline: none;
+  cursor: pointer;
+  color-scheme: dark;
+}
+.ov-date-pick input::-webkit-calendar-picker-indicator {
+  filter: invert(0.75) sepia(1) saturate(3) hue-rotate(160deg);
+  cursor: pointer;
+}
+.ov-close {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  color: #7fa6c0;
+  cursor: pointer;
+  background: none;
+  border: 1px solid rgba(127, 166, 192, 0.3);
+  border-radius: 6px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.ov-close:hover {
+  color: #ff9c98;
+  border-color: rgba(227, 112, 107, 0.6);
+}
+.ov-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(46, 213, 115, 0.4) transparent;
+}
+.ov-body::-webkit-scrollbar { width: 8px; }
+.ov-body::-webkit-scrollbar-thumb {
+  background: rgba(46, 213, 115, 0.35);
+  border-radius: 4px;
+}
+
+/* KPI 卡片 */
+.ov-kpis {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 10px;
+}
+.ov-kpi {
+  padding: 11px 13px;
+  border-radius: 9px;
+  background: linear-gradient(160deg, rgba(16, 40, 56, 0.85), rgba(8, 20, 30, 0.85));
+  border: 1px solid rgba(0, 212, 255, 0.22);
+  box-shadow: inset 0 0 16px rgba(0, 40, 70, 0.3);
+}
+.ov-kpi.is-peak {
+  border-color: rgba(255, 159, 67, 0.5);
+  box-shadow: inset 0 0 16px rgba(120, 60, 0, 0.3), 0 0 16px rgba(255, 159, 67, 0.12);
+}
+.ov-kpi.is-valley {
+  border-color: rgba(0, 212, 255, 0.45);
+}
+.ov-kpi-label {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: #8fb4c6;
+}
+.ov-kpi-value {
+  margin-top: 5px;
+  font-size: 23px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: #eafaff;
+  font-variant-numeric: tabular-nums;
+}
+.ov-kpi.is-peak .ov-kpi-value { color: #ffb98a; }
+.ov-kpi.is-valley .ov-kpi-value { color: #7fe7ff; }
+.ov-kpi-value i {
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 400;
+  color: #8fb4c6;
+  margin-left: 3px;
+}
+.ov-kpi-sub {
+  margin-top: 5px;
+  font-size: 10.5px;
+  color: #6f95a8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 图表卡片 */
+.ov-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.62fr) minmax(0, 1fr);
+  gap: 14px;
+}
+.ov-card {
+  padding: 13px 15px 12px;
+  border-radius: 10px;
+  background: linear-gradient(165deg, rgba(13, 32, 46, 0.85), rgba(7, 17, 26, 0.9));
+  border: 1px solid rgba(0, 212, 255, 0.2);
+  box-shadow: inset 0 0 20px rgba(0, 30, 55, 0.35);
+}
+.ov-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.ov-card-head h4 {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  color: #dff6ff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ov-hot {
+  font-style: normal;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: #07131d;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, #ffd166, #ff9f43);
+}
+.ov-card-sub {
+  font-size: 10.5px;
+  color: #7fa6bd;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.ov-card-tags { display: flex; gap: 7px; }
+.ov-card-tags i,
+.ov-mr-name em {
+  font-style: normal;
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.tag-max, .tag-danger { color: #ffc4ad; background: rgba(255, 107, 71, 0.16); border: 1px solid rgba(255, 107, 71, 0.45); }
+.tag-min, .tag-good { color: #a7f3d5; background: rgba(46, 213, 115, 0.13); border: 1px solid rgba(46, 213, 115, 0.4); }
+.tag-warn { color: #ffe1a1; background: rgba(255, 159, 67, 0.13); border: 1px solid rgba(255, 159, 67, 0.42); }
+.tag-normal { color: #a9d8f5; background: rgba(59, 130, 246, 0.13); border: 1px solid rgba(59, 130, 246, 0.4); }
+.tag-na { color: #9db4c2; background: rgba(127, 166, 192, 0.12); border: 1px solid rgba(127, 166, 192, 0.35); }
+
+.ov-bar-callout,
+.ov-time-note {
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: #9dbfce;
+  margin-bottom: 6px;
+}
+.ov-bar-callout b,
+.ov-time-note b { font-weight: 700; }
+.c-max { color: #ff9f7a; }
+.c-min { color: #48e8a0; }
+.ov-callout-sep { margin: 0 8px; color: #46677a; }
+
+.ov-click-hint {
+  color: #6f95a8;
+  font-size: 11px;
+}
+
+/* ECharts 图表容器 */
+.ov-chart { width: 100%; }
+.ov-chart-bar { height: 400px; }
+.ov-chart-pie { height: 320px; }
+.ov-chart-time { height: 300px; }
+.ov-chart-roomtime { height: 300px; }
+
+/* 单房选择器 */
+.ov-room-pick {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  letter-spacing: 0.05em;
+  color: #8fd8f7;
+}
+.ov-room-pick select {
+  min-width: 210px;
+  max-width: 46vw;
+  padding: 5px 9px;
+  font-size: 11.5px;
+  color: #dff6ff;
+  background: rgba(0, 50, 78, 0.7);
+  border: 1px solid rgba(0, 212, 255, 0.4);
+  border-radius: 7px;
+  outline: none;
+  cursor: pointer;
+}
+.ov-room-pick select:focus { border-color: rgba(0, 212, 255, 0.85); box-shadow: 0 0 10px rgba(0, 212, 255, 0.25); }
+.ov-room-pick option { background: #0b1a26; color: #dff6ff; }
+
+/* 无数据空态 */
+.ov-empty {
+  flex: 1;
+  min-height: 300px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #7fa6bd;
+}
+.ov-empty p { font-size: 14px; color: #bfe6f5; letter-spacing: 0.06em; }
+.ov-empty span { font-size: 11.5px; color: #6f95a8; }
+
+/* 时段 */
+.ov-buckets {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ov-bucket {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 5px 12px;
+  border-radius: 7px;
+  background: rgba(0, 90, 130, 0.14);
+  border: 1px solid rgba(0, 212, 255, 0.25);
+}
+.ov-bucket label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  font-size: 10.5px;
+  color: #8fb4c6;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+.ov-bucket label small {
+  font-size: 9.5px;
+  color: #6f95a8;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+.ov-bucket.is-peak label { color: #ffc4ad; }
+.ov-bucket.is-peak label small { color: #d98a6c; }
+.ov-bucket.is-valley label { color: #a9d8f5; }
+.ov-bucket.is-valley label small { color: #6fa9c8; }
+.ov-bucket b {
+  font-size: 12.5px;
+  color: #bfe6f5;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.ov-bucket.is-peak {
+  border-color: rgba(255, 122, 77, 0.7);
+  background: rgba(255, 122, 77, 0.12);
+  box-shadow: 0 0 14px rgba(255, 122, 77, 0.18);
+}
+.ov-bucket.is-peak b { color: #ffb98a; }
+.ov-bucket.is-valley {
+  border-color: rgba(46, 213, 115, 0.65);
+  background: rgba(46, 213, 115, 0.1);
+}
+.ov-bucket.is-valley b { color: #88f0bb; }
+
+/* 裕度 */
+.ov-margin-kpis {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+  margin: 4px 0 12px;
+}
+.ov-mk {
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: rgba(8, 24, 32, 0.7);
+  border: 1px solid rgba(46, 213, 115, 0.22);
+}
+.ov-mk.is-hot {
+  border-color: rgba(255, 209, 102, 0.6);
+  background: linear-gradient(160deg, rgba(70, 52, 12, 0.65), rgba(24, 26, 10, 0.7));
+  box-shadow: 0 0 18px rgba(255, 170, 40, 0.14);
+}
+.ov-mk p {
+  font-size: 11px;
+  color: #8fb4aa;
+  letter-spacing: 0.05em;
+}
+.ov-mk b {
+  display: block;
+  margin: 4px 0 3px;
+  font-size: 21px;
+  font-weight: 700;
+  color: #eafff6;
+  font-variant-numeric: tabular-nums;
+}
+.ov-mk.is-hot b { color: #ffd98a; }
+.ov-mk b i {
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 400;
+  color: #8fb4aa;
+  margin-left: 2px;
+}
+.ov-mk b.is-neg { color: #ff7a6b; }
+.ov-mk span {
+  font-size: 10.5px;
+  color: #6f95a8;
+}
+.ov-advice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 12px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  line-height: 1.65;
+  color: #dceee6;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 209, 102, 0.35);
+  background: rgba(255, 209, 102, 0.08);
+}
+.ov-advice svg {
+  flex: none;
+  margin-top: 3px;
+  color: #ffd166;
+}
+
+/* 裕度明细行 */
+.ov-mr {
+  border: 1px solid rgba(0, 212, 255, 0.16);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ov-mr-head,
+.ov-mr-row {
+  display: grid;
+  grid-template-columns: 158px 92px minmax(0, 1fr) 120px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+}
+.ov-mr-head {
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  color: #7fa6bd;
+  background: rgba(0, 70, 100, 0.22);
+}
+.ov-mr-row {
+  font-size: 12px;
+  color: #cfe9f4;
+  border-top: 1px solid rgba(0, 212, 255, 0.1);
+}
+.ov-mr-row:nth-child(even) { background: rgba(10, 30, 42, 0.4); }
+.ov-mr-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-weight: 600;
+}
+.ov-mr-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
+.ov-mr-dot.is-danger { background: #ff6b47; box-shadow: 0 0 8px rgba(255, 107, 71, 0.7); }
+.ov-mr-dot.is-warn { background: #ff9f43; box-shadow: 0 0 8px rgba(255, 159, 67, 0.6); }
+.ov-mr-dot.is-normal { background: #3b82f6; }
+.ov-mr-dot.is-good { background: #2ed573; box-shadow: 0 0 8px rgba(46, 213, 115, 0.55); }
+.ov-mr-dot.is-na { background: #7fa6c0; }
+.ov-mr-name em {
+  margin-left: auto;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.ov-mr-rate {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.ov-mr-rate.is-danger { color: #ff8a6b; }
+.ov-mr-rate.is-warn { color: #ffc46b; }
+.ov-mr-rate.is-normal { color: #8fc8ff; }
+.ov-mr-rate.is-good { color: #63e6a3; }
+.ov-mr-rate.is-na { color: #9db4c2; }
+.ov-mr-track-wrap { min-width: 0; }
+.ov-mr-track {
+  position: relative;
+  display: block;
+  height: 9px;
+  border-radius: 5px;
+  background: rgba(127, 166, 192, 0.14);
+  overflow: visible;
+}
+.ov-mr-load {
+  display: block;
+  height: 100%;
+  border-radius: 5px;
+  transition: width 0.3s;
+}
+.ov-mr-load.is-danger { background: linear-gradient(90deg, #ff6b47, #ff3b30); }
+.ov-mr-load.is-warn { background: linear-gradient(90deg, #ffb347, #ff9f43); }
+.ov-mr-load.is-normal { background: linear-gradient(90deg, #4a9df5, #3b82f6); }
+.ov-mr-load.is-good { background: linear-gradient(90deg, #43e09a, #2ed573); }
+.ov-mr-load.is-na { background: rgba(127, 166, 192, 0.4); }
+.ov-tick80 {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  left: 80%;
+  width: 1.5px;
+  background: rgba(255, 255, 255, 0.55);
+}
+.ov-mr-th-track {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.ov-tick80-label {
+  font-style: normal;
+  font-size: 10px;
+  color: #cfe9f4;
+  opacity: 0.75;
+}
+.ov-mr-track-wrap small {
+  display: block;
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: #7fa6bd;
+  font-variant-numeric: tabular-nums;
+}
+.ov-mr-margin {
+  text-align: right;
+  font-size: 11px;
+  color: #8fb4c6;
+  font-variant-numeric: tabular-nums;
+}
+.ov-mr-margin b {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #63e6a3;
+}
+.ov-mr-margin i { font-style: normal; color: #7fa6bd; }
+.ov-footnote {
+  margin-top: 10px;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: #6f95a8;
+}
+
+.ov-fade-enter-active,
+.ov-fade-leave-active { transition: opacity 0.22s ease; }
+.ov-fade-enter-active .ov-modal,
+.ov-fade-leave-active .ov-modal { transition: transform 0.26s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.22s; }
+.ov-fade-enter-from,
+.ov-fade-leave-to { opacity: 0; }
+.ov-fade-enter-from .ov-modal,
+.ov-fade-leave-to .ov-modal { transform: translateY(16px) scale(0.97); opacity: 0; }
+
 /* ---------- 响应式 ---------- */
 @media (max-width: 900px) {
   .power-panel {
@@ -2433,20 +3968,40 @@ onBeforeUnmount(() => {
   }
   .plan-tl { left: 14px; top: 14px; }
   .topo-entry {
-    padding: 8px 10px;
+    padding: 6px 10px 6px 9px;
     gap: 8px;
   }
-  .topo-entry-icon { width: 30px; height: 30px; }
+  .topo-entry-icon { width: 24px; height: 24px; }
   .topo-entry-text i { display: none; }
   .topo-entry-arrow { display: none; }
   .topo-mask { padding: 14px; }
+  .ov-mask { padding: 12px; }
+  .ov-modal { max-height: 96%; }
+  .ov-kpis { grid-template-columns: repeat(2, 1fr); }
+  .ov-grid { grid-template-columns: 1fr; }
+  .ov-margin-kpis { grid-template-columns: repeat(2, 1fr); }
+  .ov-chart-bar { height: 460px; }
+  .ov-chart-pie { height: 420px; }
+  .ov-room-pick select { max-width: 56vw; }
+  .ov-mr-head { display: none; }
+  .ov-mr-row {
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 12px;
+  }
+  .ov-mr-track-wrap { grid-column: 1 / -1; }
+  .ov-entry { padding: 6px 10px 6px 9px; gap: 8px; }
+  .ov-entry-icon { width: 24px; height: 24px; }
+  .ov-entry-text i { display: none; }
+  .ov-entry-arrow { display: none; }
+  .ov-date-pick input { width: 108px; }
   .cap-edit { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .hud-scan, .pin-pulse, .topo-entry, .room-draft-cross { animation: none; }
+  .hud-scan, .pin-pulse, .room-draft-cross { animation: none; }
   .pin-pulse { opacity: 0; }
   .panel-slide-enter-active, .panel-slide-leave-active { transition: none; }
   .topo-fade-enter-active, .topo-fade-leave-active { transition: none; }
+  .ov-fade-enter-active, .ov-fade-leave-active { transition: none; }
   .room-fade-enter-active, .room-fade-leave-active { transition: none; }
 }
 </style>
